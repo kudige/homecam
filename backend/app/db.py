@@ -6,13 +6,10 @@ engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread"
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# Dependency
-from contextlib import contextmanager
-
-@contextmanager
+# FastAPI dependency: yield a real Session
 def get_session():
-    session = SessionLocal()
+    db = SessionLocal()
     try:
-        yield session
+        yield db
     finally:
-        session.close()
+        db.close()

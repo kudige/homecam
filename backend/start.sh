@@ -7,4 +7,4 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
   exit 1
 fi
 
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+uvicorn app.main:app --host 0.0.0.0 --port 8091

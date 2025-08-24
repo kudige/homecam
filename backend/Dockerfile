@@ -14,5 +14,5 @@ RUN chmod +x /start.sh
 VOLUME [ "/media", "/data" ]
 ENV MEDIA="/media"
 
-EXPOSE 8000
+EXPOSE 8091
 CMD ["/start.sh"]

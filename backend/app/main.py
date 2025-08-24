@@ -60,7 +60,7 @@ def create_camera(body: CameraCreate, session: Session = Depends(get_session)):
 
 @app.put("/api/cameras/{cam_id}", response_model=CameraOut)
 def update_camera(cam_id: int, body: CameraUpdate, session: Session = Depends(get_session)):
-    cam = session.query(Camera).get(cam_id)
+    cam = session.get(Camera,cam_id)
     if not cam:
         raise HTTPException(404, "Not found")
     for f, v in body.dict(exclude_unset=True).items():
@@ -71,7 +71,7 @@ def update_camera(cam_id: int, body: CameraUpdate, session: Session = Depends(ge
 
 @app.delete("/api/cameras/{cam_id}")
 def delete_camera(cam_id: int, session: Session = Depends(get_session)):
-    cam = session.query(Camera).get(cam_id)
+    cam = session.get(Camera,cam_id)
     if not cam:
         return {"ok": True}
     # stop if running
@@ -84,7 +84,7 @@ def delete_camera(cam_id: int, session: Session = Depends(get_session)):
 
 @app.post("/api/cameras/{cam_id}/start")
 def start_camera(cam_id: int, session: Session = Depends(get_session)):
-    cam = session.query(Camera).get(cam_id)
+    cam = session.get(Camera,cam_id)
     if not cam:
         raise HTTPException(404, "Not found")
     ffmpeg_manager.start_camera(
@@ -99,7 +99,7 @@ def stop_camera(cam_id: int):
 
 @app.get("/api/cameras/{cam_id}/live")
 def live_urls(cam_id: int, session: Session = Depends(get_session)):
-    cam = session.query(Camera).get(cam_id)
+    cam = session.get(Camera,cam_id)
     if not cam:
         raise HTTPException(404, "Not found")
     base = f"/media/live/{cam.name}"
@@ -113,7 +113,7 @@ def live_urls(cam_id: int, session: Session = Depends(get_session)):
 
 @app.get("/api/cameras/{cam_id}/recordings/{date}", response_model=list[RecordingFile])
 def recordings_for_date(cam_id: int, date: str, session: Session = Depends(get_session)):
-    cam = session.query(Camera).get(cam_id)
+    cam = session.get(Camera,cam_id)
     if not cam:
         raise HTTPException(404, "Not found")
     return list_recordings(cam.name, date)

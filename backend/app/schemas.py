@@ -26,8 +26,8 @@ class CameraOut(BaseModel):
     high_crf: int
     low_crf: int
 
-    class Config:
-        orm_mode = True
+    # Pydantic v2
+    model_config = {"from_attributes": True}
 
 class RecordingFile(BaseModel):
     path: str
