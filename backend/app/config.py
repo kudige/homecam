@@ -11,6 +11,11 @@ class Settings(BaseSettings):
     RECORDING_SEGMENT_SEC: int = 300
     DEFAULT_RETENTION_DAYS: int = 7
 
+    # NEW: debug/ops switch for how many outputs we spawn
+    #   - "all": low + high + recordings (default)
+    #   - "low": only low-res HLS (no high, no recordings)
+    STREAM_MODE: str = "all"
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 settings = Settings()
@@ -23,3 +28,4 @@ else:
     REC_DIR = MEDIA_ROOT / settings.REC_SUBDIR
 
 DB_PATH = Path(settings.DB_PATH)
+

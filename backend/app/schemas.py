@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional
 
 class CameraCreate(BaseModel):
     name: str
@@ -15,7 +15,8 @@ class CameraUpdate(BaseModel):
     high_crf: Optional[int] = None
     low_crf: Optional[int] = None
 
-class CameraOut(BaseModel):
+# Admin view (includes RTSP)
+class CameraAdminOut(BaseModel):
     id: int
     name: str
     rtsp_url: str
@@ -25,11 +26,18 @@ class CameraOut(BaseModel):
     low_height: int
     high_crf: int
     low_crf: int
-
-    # Pydantic v2
     model_config = {"from_attributes": True}
+
+# Client view (no RTSP; includes ready-to-use HLS URLs and status)
+class CameraClientOut(BaseModel):
+    id: int
+    name: str
+    enabled: bool
+    hls_low: str
+    hls_high: str
+    status: dict
 
 class RecordingFile(BaseModel):
     path: str
-    start_ts: float  # epoch seconds inferred from filename
-    size_bytes: int
+    start_ts: float # epoch seconds inferred from filename
+    size_bytes: int    

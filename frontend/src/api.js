@@ -1,30 +1,43 @@
 const API = {
-  async getCameras() {
-    const r = await fetch('/api/cameras');
-    return r.json();
+  // CLIENT (no RTSP)
+  getCamerasClient() {
+    return fetch('/api/cameras').then(r => r.json());
   },
-  async startCamera(id) {
-    const r = await fetch(`/api/cameras/${id}/start`, { method: 'POST' });
-    return r.json();
+
+  // ADMIN (with RTSP, manage cameras)
+  getCamerasAdmin() {
+    return fetch('/api/admin/cameras').then(r => r.json());
   },
-  async stopCamera(id) {
-    const r = await fetch(`/api/cameras/${id}/stop`, { method: 'POST' });
-    return r.json();
-  },
-  liveUrls(camId) {
-    return fetch(`/api/cameras/${camId}/live`).then(r => r.json());
-  },
-  recordings(camId, date) {
-    return fetch(`/api/cameras/${camId}/recordings/${date}`).then(r => r.json());
-  },
-  async addCamera({ name, rtsp_url, retention_days }) {
-    const r = await fetch('/api/cameras', {
+  addCameraAdmin({ name, rtsp_url, retention_days }) {
+    return fetch('/api/admin/cameras', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, rtsp_url, retention_days })
+    }).then(async r => {
+      if (!r.ok) throw new Error(await r.text());
+      return r.json();
     });
-    if (!r.ok) throw new Error(await r.text());
-    return r.json();
+  },
+  updateCameraAdmin(id, body) {
+    return fetch(`/api/admin/cameras/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(r => r.json());
+  },
+  deleteCameraAdmin(id) {
+    return fetch(`/api/admin/cameras/${id}`, { method: 'DELETE' }).then(r => r.json());
+  },
+  startCameraAdmin(id) {
+    return fetch(`/api/admin/cameras/${id}/start`, { method: 'POST' }).then(r => r.json());
+  },
+  stopCameraAdmin(id) {
+    return fetch(`/api/admin/cameras/${id}/stop`, { method: 'POST' }).then(r => r.json());
+  },
+
+  // recordings (unchanged)
+  recordings(camId, date) {
+    return fetch(`/api/cameras/${camId}/recordings/${date}`).then(r => r.json());
   }
-};
+}
 export default API;

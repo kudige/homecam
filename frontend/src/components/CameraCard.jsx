@@ -65,9 +65,9 @@ export default function CameraCard({ cam }){
     try {
       setStatus('starting')
       await API.startCamera(cam.id)
-      const u = await API.liveUrls(cam.id)
-      const src = u.low
-
+      //const u = await API.liveUrls(cam.id)
+      const src = cam.jhls_low
+	  console.log("cam.hls_low = ", src)
       if (Hls.isSupported()){
         // Tear down old instance if any
         if (hlsRef.current) {

@@ -90,106 +90,120 @@ class FFmpegManager:
         low_crf: int,
         high_crf: int,
     ) -> None:
-        # If already running, do nothing
         if cam_id in self._procs and self._procs[cam_id].poll() is None:
             logger.info("start_camera: already running cam_id=%s cam_name=%s", cam_id, cam_name)
             return
 
+        mode = (settings.STREAM_MODE or "all").lower()
+        logger.info("Starting camera %s (id=%s) with STREAM_MODE=%s", cam_name, cam_id, mode)
+        SEG_DUR = "2"
+
+
         self._ensure_live_dirs(cam_name)
-        self._ensure_rec_date_hour(cam_name)  # ensure current hour dir exists
+        # Only prepare recordings dirs when we actually produce recordings
+        prepare_recordings = (mode == "all")
 
         low_dir = LIVE_DIR / cam_name / "low"
         high_dir = LIVE_DIR / cam_name / "high"
         rec_base = REC_DIR / cam_name
         log_path = LIVE_DIR / cam_name / "ffmpeg.log"
+        SEG_DUR = "2"
 
-        SEG_DUR = "2"  # seconds
-
-        # Split decoded video into two branches; scale only the low branch.
-        filter_graph = f"[0:v]split=2[vhi][vtmp];[vtmp]scale={low_w}:{low_h}[vlow]"
+        # Low-only mode: only ensure low dir; in all-mode, we’ll ensure rec dirs too
+        if prepare_recordings:
+            self._ensure_rec_date_hour(cam_name)
 
         cmd = [
-            "ffmpeg",
-            "-y",
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel", "warning",
-
+            "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "warning",
             "-rtsp_transport", "tcp",
             "-i", rtsp_url,
-
-            # make timestamps monotonic for live segmentation (safe for RTSP sources)
             "-fflags", "+genpts",
-
-            "-filter_complex", filter_graph,
-
-            # ----------------- LOW RES LIVE (video-only HLS) -----------------
-            "-map", "[vlow]",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", str(low_crf),
-            "-g", "48",
-            "-sc_threshold", "0",
-            "-force_key_frames", f"expr:gte(t,n_forced*{SEG_DUR})",
-            "-maxrate", "1200k",
-            "-bufsize", "1200k",
-            "-an",
-            "-f", "hls",
-            "-hls_time", SEG_DUR,
-            "-hls_list_size", "12",
-            "-hls_allow_cache", "0",
-            "-hls_flags", "delete_segments+independent_segments+append_list+temp_file",
-            "-hls_segment_filename", str(low_dir / "segment_%06d.ts"),
-            str(low_dir / "index.m3u8"),
-
-            # ----------------- HIGH RES LIVE (av HLS) -----------------
-            "-map", "[vhi]",
-            "-map", "0:a?",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", str(high_crf),
-            "-g", "48",
-            "-sc_threshold", "0",
-            "-force_key_frames", f"expr:gte(t,n_forced*{SEG_DUR})",
-            "-maxrate", "4000k",
-            "-bufsize", "4000k",
-            "-c:a", "aac",
-            "-ar", "44100",
-            "-ac", "1",
-            "-f", "hls",
-            "-hls_time", SEG_DUR,
-            "-hls_list_size", "12",
-            "-hls_allow_cache", "0",
-            "-hls_flags", "delete_segments+independent_segments+append_list+temp_file",
-            "-hls_segment_filename", str(high_dir / "segment_%06d.ts"),
-            str(high_dir / "index.m3u8"),
-
-            # ----------------- RECORDINGS (MP4 segments) -----------------
-            "-map", "0:v",
-            "-map", "0:a?",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", str(max(18, min(28, high_crf))),
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-f", "segment",
-            "-segment_time", str(settings.RECORDING_SEGMENT_SEC),
-            "-reset_timestamps", "1",
-            "-strftime", "1",
-            # strftime_mkdir does NOT work for segment+mp4, so we manage dirs in Python
-            str(rec_base / "%Y-%m-%d/%H/%Y-%m-%d_%H-%M-%S.mp4"),
         ]
 
-        logger.info("Starting ffmpeg for cam_id=%s cam_name=%s", cam_id, cam_name)
-        logger.debug("FFmpeg cmd: %s", " ".join(cmd))
+        if mode == "all":
+            # Two branches: high (vhi) and low (vlow)
+            filter_graph = f"[0:v]split=2[vhi][vtmp];[vtmp]scale={low_w}:{low_h}[vlow]"
+            cmd += ["-filter_complex", filter_graph]
+
+            # ---- LOW (always) ----
+            cmd += [
+                "-map","[vlow]",
+                "-c:v","libx264","-preset","veryfast","-crf",str(low_crf),
+                "-g","48","-sc_threshold","0",
+                "-force_key_frames", f"expr:gte(t,n_forced*{SEG_DUR})",
+                "-maxrate","1200k","-bufsize","1200k",
+                "-an",
+                "-f","hls",
+                "-hls_time", SEG_DUR,
+                "-hls_list_size","12",
+                "-hls_allow_cache","0",
+                "-hls_flags","delete_segments+independent_segments+append_list+temp_file",
+                "-hls_segment_filename", str(low_dir / "segment_%06d.ts"),
+                str(low_dir / "index.m3u8"),
+            ]
+
+            # ---- HIGH HLS ----
+            cmd += [
+                "-map","[vhi]","-map","0:a?",
+                "-c:v","libx264","-preset","veryfast","-crf",str(high_crf),
+                "-g","48","-sc_threshold","0",
+                "-force_key_frames", f"expr:gte(t,n_forced*{SEG_DUR})",
+                "-maxrate","4000k","-bufsize","4000k",
+                "-c:a","aac","-ar","44100","-ac","1",
+                "-f","hls",
+                "-hls_time", SEG_DUR,
+                "-hls_list_size","12",
+                "-hls_allow_cache","0",
+                "-hls_flags","delete_segments+independent_segments+append_list+temp_file",
+                "-hls_segment_filename", str(high_dir / "segment_%06d.ts"),
+                str(high_dir / "index.m3u8"),
+            ]
+
+            # ---- RECORDINGS ----
+            cmd += [
+                "-map","0:v","-map","0:a?",
+                "-c:v","libx264","-preset","veryfast","-crf",str(max(18, min(28, high_crf))),
+                "-c:a","aac","-b:a","128k",
+                "-f","segment",
+                "-segment_time", str(settings.RECORDING_SEGMENT_SEC),
+                "-reset_timestamps","1",
+                "-strftime","1",
+                str(rec_base / "%Y-%m-%d/%H/%Y-%m-%d_%H-%M-%S.mp4"),
+            ]
+
+        else:  # STREAM_MODE=low
+            # Single branch only; no split -> no unconnected pads
+            filter_graph = f"[0:v]scale={low_w}:{low_h}[vlow]"
+            cmd += ["-filter_complex", filter_graph]
+
+            cmd += [
+                "-map","[vlow]",
+                "-c:v","libx264","-preset","veryfast","-crf",str(low_crf),
+                "-g","48","-sc_threshold","0",
+                "-force_key_frames", f"expr:gte(t,n_forced*{SEG_DUR})",
+                "-maxrate","1200k","-bufsize","1200k",
+                "-an",
+                "-f","hls",
+                "-hls_time", SEG_DUR,
+                "-hls_list_size","12",
+                "-hls_allow_cache","0",
+                "-hls_flags","delete_segments+independent_segments+append_list+temp_file",
+                "-hls_segment_filename", str(low_dir / "segment_%06d.ts"),
+                str(low_dir / "index.m3u8"),
+            ]
+            # NOTE: No maps for [vhi] or audio; no recordings branch
+
+        logger.debug("FFmpeg cmd: %s", " ".join(str(x) for x in cmd))
         logger.info("FFmpeg stderr log: %s", log_path)
 
         log_file = open(log_path, "ab", buffering=0)
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=log_file)
         self._procs[cam_id] = proc
 
-        # Start maintainer thread AFTER storing proc
-        threading.Thread(target=self._maintain_rec_dirs, args=(cam_id, cam_name), daemon=True).start()
+        if mode == "all":
+            # Only maintain recording dirs when recording is enabled
+            threading.Thread(target=self._maintain_rec_dirs, args=(cam_id, cam_name), daemon=True).start()
+            
 
     def stop_camera(self, cam_id: int) -> None:
         p = self._procs.pop(cam_id, None)

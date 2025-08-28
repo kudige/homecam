@@ -1,5 +1,4 @@
-import React, { useEffect, useState } from 'react'
-import API from '../api'
+import React from 'react'
 import CameraCard from './CameraCard'
 
 export default function CameraGrid({ cameras }){
