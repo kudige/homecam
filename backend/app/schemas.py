@@ -41,3 +41,12 @@ class RecordingFile(BaseModel):
     path: str
     start_ts: float # epoch seconds inferred from filename
     size_bytes: int    
+
+class CameraClientItem(BaseModel):
+    id: str
+    name: str
+    low_url: str
+    high_url: str
+
+class CameraClientList(BaseModel):
+    cameras: list[CameraClientItem]    

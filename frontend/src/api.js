@@ -1,7 +1,10 @@
 const API = {
   // CLIENT (no RTSP)
   getCamerasClient() {
-    return fetch('/api/cameras').then(r => r.json());
+	console.log("getCamerasClient called")
+	return fetch('/api/cameras')
+      .then(r => r.json())
+      .then(json => json.cameras || []);   // <-- unwrap
   },
 
   // ADMIN (with RTSP, manage cameras)
@@ -41,3 +44,4 @@ const API = {
   }
 }
 export default API;
+

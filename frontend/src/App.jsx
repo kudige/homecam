@@ -7,8 +7,11 @@ export default function App(){
   const [clientCams, setClientCams] = useState([])
   const [view, setView] = useState('grid') // 'grid' | 'recordings' | 'admin'
 
-  async function refreshClient(){ setClientCams(await API.getCamerasClient()) }
-  useEffect(() => { refreshClient() }, [])
+  async function refreshClient(){
+	const list = await API.getCamerasClient()
+	console.log(list)
+	setClientCams(Array.isArray(list) ? list : [])   // <-- ensure array
+  }
 
   return (
     <>
