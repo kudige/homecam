@@ -140,18 +140,16 @@ def admin_delete_camera(cam_id: int, session: Session = Depends(get_session)):
     session.commit()
     return {"ok": True}
 
-
 @app.post("/api/admin/cameras/{cam_id}/start")
 def admin_start_camera(cam_id: int, session: Session = Depends(get_session)):
     cam = session.get(Camera, cam_id)
     if not cam:
         raise HTTPException(404, "Not found")
 
-    # resolve low/high inputs
+    # resolve low/high inputs (same as you have)
     low_stream = next((s for s in cam.streams if s.id == cam.preferred_low_stream_id), None)
     high_stream = next((s for s in cam.streams if s.id == cam.preferred_high_stream_id), None)
 
-    # auto-pick if not preset or missing resolution
     if not low_stream:
         low_stream = pick_best_stream(cam, cam.grid_target_w, cam.grid_target_h)
     if not high_stream:
@@ -160,16 +158,20 @@ def admin_start_camera(cam_id: int, session: Session = Depends(get_session)):
     low_url = (low_stream.rtsp_url if low_stream else cam.rtsp_url)
     high_url = (high_stream.rtsp_url if high_stream else cam.rtsp_url)
 
-    # one process if same source; dual processes otherwise
     same_source = (low_url == high_url)
 
+    # >>> IMPORTANT: pass grid target to the manager (NOT low_width/low_height)
     ffmpeg_manager.start_camera_dual(
-        cam.id, cam.name,
+        cam_id=cam.id,
+        cam_name=cam.name,
         low_src=low_url,
         high_src=high_url,
         same_source=same_source,
-        low_w=cam.low_width, low_h=cam.low_height,
-        low_crf=cam.low_crf, high_crf=cam.high_crf
+        # Use your grid FULL numbers here:
+        grid_w=cam.grid_target_w or 640,
+        grid_h=cam.grid_target_h or 360,
+        low_crf=cam.low_crf,
+        high_crf=cam.high_crf,
     )
     return {"ok": True, "same_source": same_source}
 

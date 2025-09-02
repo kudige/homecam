@@ -230,22 +230,32 @@ class FFmpegManager:
         running = p is not None and p.poll() is None
         return {"running": running}
 
-    def start_camera_dual(self, cam_id: int, cam_name: str,
-                              low_src: str, high_src: str, same_source: bool,
-                              low_w: int, low_h: int, low_crf: int, high_crf: int):
-            # stop any existing procs for this cam_id
-            self.stop_camera(cam_id)
-    
-            if same_source:
-                # reuse your current single-process method (split to low/high + record)
-                return self.start_camera(cam_id, cam_name, high_src, low_w, low_h, low_crf, high_crf)
-    
-            # else: launch TWO processes:
-            # 1) low HLS from low_src (video-only)
-            # 2) high HLS + recordings from high_src (av + segments)
-            self._start_low_only(cam_id, cam_name, low_src, low_w, low_h, low_crf)
-            self._start_high_and_record(cam_id, cam_name, high_src, high_crf)
-    
+    def start_camera_dual(self, cam_id:int, cam_name:str,
+                          low_src:str, high_src:str, same_source:bool,
+                          grid_w:int, grid_h:int,
+                          low_crf:int, high_crf:int):
+        logger.info("camera_dual grid_w=%s grid_h=%s", grid_w, grid_h) 
+        self.stop_camera(cam_id)
+        if same_source:
+            # Single input => split to high + low; scale low to grid target
+            return self._start_single_with_split(
+                cam_id, cam_name, src=high_src,
+                low_scale_w=grid_w, low_scale_h=grid_h,
+                low_crf=low_crf, high_crf=high_crf
+            )
+        else:
+            # Dual inputs:
+            # Low = its own process, NO scale (use camera sub-stream as-is)
+            self._start_low_only(cam_id, cam_name, low_src, low_crf)
+            # High + recordings = its own process
+            self._start_high_and_record(cam_id, cam_name, high_src, high_crf)    
+
+    def _start_single_with_split(self, cam_id, cam_name, src, low_scale_w, low_scale_h, low_crf, high_crf):
+        # filter_complex should be:
+        #   [0:v]split=2[vhi][vtmp];[vtmp]scale=<low_scale_w>:<low_scale_h>[vlow]
+        # (NO 640:-1 anywhere)
+        ...
+            
     def _start_low_only(self, cam_id, cam_name, rtsp_url, low_w, low_h, low_crf):
         # like your low branch, its own process writing /live/<cam>/low/*
         # (Implement mirroring the low HLS portion of start_camera with single input)

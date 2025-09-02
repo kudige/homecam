@@ -115,15 +115,18 @@ function CameraAdminRow({ cam, expanded, onToggle, onRefresh }){
     }catch{ setStreams([]) }
   }
 
-  
   useEffect(() => {
-	setGridW(cam.grid_target_w ?? 640)
-	setGridH(cam.grid_target_h ?? 360)
-	setFullW(cam.full_target_w ?? 1920)
-	setFullH(cam.full_target_h ?? 1080)
-	setPrefLow(cam.preferred_low_stream_id ?? '')
-	setPrefHigh(cam.preferred_high_stream_id ?? '')
-  }, [cam.id, cam.grid_target_w, cam.grid_target_h, cam.full_target_w, cam.full_target_h, cam.preferred_low_stream_id, cam.preferred_high_stream_id])
+	if (!expanded) return
+	// Seed from cam.streams if available to avoid a blank panel
+	if (Array.isArray(cam.streams) && cam.streams.length && !streams.length) {
+      setStreams(cam.streams)
+	}
+	// Always fetch fresh list in the background
+	(async () => {
+      try { await refreshStreams() } catch {}
+	})()
+	// eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, cam.id])
 
   async function addStream(){
     if (!newName || !newUrl) return
@@ -199,6 +202,11 @@ function CameraAdminRow({ cam, expanded, onToggle, onRefresh }){
             </div>
             <button className="btn" onClick={savePrefs}>Save Preferences</button>
           </div>
+
+		  <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:8}}>
+			<div style={{fontWeight:600}}>Streams</div>
+			<button className="btn secondary" onClick={refreshStreams}>Refresh</button>
+		  </div>
 
           {/* Streams list */}
           <div style={{marginTop:16}}>
