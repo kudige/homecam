@@ -7,6 +7,10 @@ import os
 from sqlalchemy.orm import Session
 import threading
 from typing import List
+from .schemas import CameraStreamCreate, CameraStreamOut
+from .ffprobe_utils import probe_rtsp
+import datetime as dt
+
 
 from .db import Base, engine, get_session, SessionLocal
 from .models import Camera
@@ -49,6 +53,25 @@ app.mount("/media", StaticFiles(directory=str(MEDIA_ROOT)), name="media")
 # Background retention loop (daily)
 threading.Thread(target=run_retention_loop, args=(get_session,), daemon=True).start()
 
+def pick_best_stream(cam: Camera, want_w: int, want_h: int):
+    """
+    Select the enabled stream whose resolution is the 'closest at or above' the target
+    (fallback to closest below if none above). Returns CameraStream or None.
+    """
+    candidates = [s for s in cam.streams if s.enabled and s.width and s.height]
+    if not candidates:
+        return None
+    def score(s):
+        # prefer >= target with minimal overshoot; otherwise minimal undershoot
+        over_w = max(0, s.width - want_w)
+        over_h = max(0, s.height - want_h)
+        under_w = max(0, want_w - s.width)
+        under_h = max(0, want_h - s.height)
+        over = over_w + over_h
+        under = under_w + under_h
+        # Streams that meet/exceed target get better base; tie-breaker by total diff
+        return (0 if over > 0 else 1, over if over > 0 else under, - (s.width * s.height))
+    return sorted(candidates, key=score)[0]
 
 # ----------------------------- Startup: autostart --------------------------------
 @app.on_event("startup")
@@ -123,16 +146,32 @@ def admin_start_camera(cam_id: int, session: Session = Depends(get_session)):
     cam = session.get(Camera, cam_id)
     if not cam:
         raise HTTPException(404, "Not found")
-    ffmpeg_manager.start_camera(
-        cam.id,
-        cam.name,
-        cam.rtsp_url,
-        cam.low_width,
-        cam.low_height,
-        cam.low_crf,
-        cam.high_crf,
+
+    # resolve low/high inputs
+    low_stream = next((s for s in cam.streams if s.id == cam.preferred_low_stream_id), None)
+    high_stream = next((s for s in cam.streams if s.id == cam.preferred_high_stream_id), None)
+
+    # auto-pick if not preset or missing resolution
+    if not low_stream:
+        low_stream = pick_best_stream(cam, cam.grid_target_w, cam.grid_target_h)
+    if not high_stream:
+        high_stream = pick_best_stream(cam, cam.full_target_w, cam.full_target_h)
+
+    low_url = (low_stream.rtsp_url if low_stream else cam.rtsp_url)
+    high_url = (high_stream.rtsp_url if high_stream else cam.rtsp_url)
+
+    # one process if same source; dual processes otherwise
+    same_source = (low_url == high_url)
+
+    ffmpeg_manager.start_camera_dual(
+        cam.id, cam.name,
+        low_src=low_url,
+        high_src=high_url,
+        same_source=same_source,
+        low_w=cam.low_width, low_h=cam.low_height,
+        low_crf=cam.low_crf, high_crf=cam.high_crf
     )
-    return {"ok": True}
+    return {"ok": True, "same_source": same_source}
 
 
 @app.post("/api/admin/cameras/{cam_id}/stop")
@@ -209,3 +248,44 @@ def get_recording_file(camera: str, date: str, hour: str, filename: str):
     if not file_path.exists():
         raise HTTPException(404, "Recording not found")
     return FileResponse(file_path)
+
+@app.get("/api/admin/cameras/{cam_id}/streams", response_model=list[CameraStreamOut])
+def admin_list_streams(cam_id: int, session: Session = Depends(get_session)):
+    cam = session.get(Camera, cam_id)
+    if not cam:
+        raise HTTPException(404, "Not found")
+    return cam.streams
+
+@app.post("/api/admin/cameras/{cam_id}/streams", response_model=CameraStreamOut)
+def admin_add_stream(cam_id: int, body: CameraStreamCreate, session: Session = Depends(get_session)):
+    cam = session.get(Camera, cam_id)
+    if not cam:
+        raise HTTPException(404, "Not found")
+    # create first
+    from .models import CameraStream
+    s = CameraStream(camera_id=cam.id, name=body.name, rtsp_url=body.rtsp_url, enabled=True)
+    session.add(s)
+    session.commit()
+    session.refresh(s)
+    # probe (best-effort)
+    try:
+        meta = probe_rtsp(s.rtsp_url)
+        s.width = meta["width"]; s.height = meta["height"]
+        s.fps = meta["fps"]; s.bitrate_kbps = meta["bitrate_kbps"]; s.probed_at = meta["probed_at"]
+        session.commit(); session.refresh(s)
+    except Exception as e:
+        # leave as enabled but without metadata; admin can re-probe later
+        pass
+    return s
+
+@app.post("/api/admin/cameras/{cam_id}/streams/{stream_id}/probe", response_model=CameraStreamOut)
+def admin_probe_stream(cam_id: int, stream_id: int, session: Session = Depends(get_session)):
+    from .models import CameraStream
+    s = session.get(CameraStream, stream_id)
+    if not s or s.camera_id != cam_id:
+        raise HTTPException(404, "Not found")
+    meta = probe_rtsp(s.rtsp_url)
+    s.width = meta["width"]; s.height = meta["height"]
+    s.fps = meta["fps"]; s.bitrate_kbps = meta["bitrate_kbps"]; s.probed_at = meta["probed_at"]
+    session.commit(); session.refresh(s)
+    return s

@@ -230,5 +230,29 @@ class FFmpegManager:
         running = p is not None and p.poll() is None
         return {"running": running}
 
+    def start_camera_dual(self, cam_id: int, cam_name: str,
+                              low_src: str, high_src: str, same_source: bool,
+                              low_w: int, low_h: int, low_crf: int, high_crf: int):
+            # stop any existing procs for this cam_id
+            self.stop_camera(cam_id)
+    
+            if same_source:
+                # reuse your current single-process method (split to low/high + record)
+                return self.start_camera(cam_id, cam_name, high_src, low_w, low_h, low_crf, high_crf)
+    
+            # else: launch TWO processes:
+            # 1) low HLS from low_src (video-only)
+            # 2) high HLS + recordings from high_src (av + segments)
+            self._start_low_only(cam_id, cam_name, low_src, low_w, low_h, low_crf)
+            self._start_high_and_record(cam_id, cam_name, high_src, high_crf)
+    
+    def _start_low_only(self, cam_id, cam_name, rtsp_url, low_w, low_h, low_crf):
+        # like your low branch, its own process writing /live/<cam>/low/*
+        # (Implement mirroring the low HLS portion of start_camera with single input)
+        pass
+
+    def _start_high_and_record(self, cam_id, cam_name, rtsp_url, high_crf):
+        # like your high HLS + recordings, its own process
+        pass    
 ffmpeg_manager = FFmpegManager()
 

@@ -42,6 +42,20 @@ const API = {
   recordings(camId, date) {
     return fetch(`/api/cameras/${camId}/recordings/${date}`).then(r => r.json());
   }
+  addStreamAdmin(camId, { name, rtsp_url }) {
+	return fetch(`/api/admin/cameras/${camId}/streams`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, rtsp_url })
+	}).then(r => r.json());
+  },
+  listStreamsAdmin(camId) {
+	return fetch(`/api/admin/cameras/${camId}/streams`).then(r => r.json());
+  },
+  probeStreamAdmin(camId, streamId) {
+	return fetch(`/api/admin/cameras/${camId}/streams/${streamId}/probe`, { method: 'POST' })
+      .then(r => r.json());
+  }
+  
 }
 export default API;
 

@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 class CameraCreate(BaseModel):
     name: str
@@ -15,18 +15,39 @@ class CameraUpdate(BaseModel):
     high_crf: Optional[int] = None
     low_crf: Optional[int] = None
 
-# Admin view (includes RTSP)
+# Streams (admin)
+class CameraStreamCreate(BaseModel):
+    name: str
+    rtsp_url: str
+
+class CameraStreamOut(BaseModel):
+    id: int
+    name: str
+    rtsp_url: str
+    enabled: bool
+    width: Optional[int]
+    height: Optional[int]
+    fps: Optional[int]
+    bitrate_kbps: Optional[int]
+    class Config:
+        from_attributes = True
+
+# Admin camera (with streams and RTSP)
 class CameraAdminOut(BaseModel):
     id: int
     name: str
     rtsp_url: str
     enabled: bool
     retention_days: int
-    low_width: int
-    low_height: int
-    high_crf: int
-    low_crf: int
-    model_config = {"from_attributes": True}
+    preferred_low_stream_id: Optional[int]
+    preferred_high_stream_id: Optional[int]
+    grid_target_w: int
+    grid_target_h: int
+    full_target_w: int
+    full_target_h: int
+    streams: List[CameraStreamOut]
+    class Config:
+        from_attributes = True
 
 # Client view (no RTSP; includes ready-to-use HLS URLs and status)
 class CameraClientOut(BaseModel):
