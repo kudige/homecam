@@ -8,7 +8,7 @@ class Camera(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True, nullable=False)
-    rtsp_url = Column(String, nullable=False)  # legacy (keep for migration/back-compat)
+    rtsp_url = Column(String, nullable=False)  # legacy
     enabled = Column(Boolean, default=True)
     retention_days = Column(Integer, default=7)
 
@@ -18,15 +18,36 @@ class Camera(Base):
     high_crf = Column(Integer, default=20)
     low_crf = Column(Integer, default=26)
 
-    # NEW: preferred streams + UI targets (admin can set)
+    # NEW: preferred streams + UI targets
     preferred_low_stream_id = Column(Integer, ForeignKey("camera_streams.id"), nullable=True)
     preferred_high_stream_id = Column(Integer, ForeignKey("camera_streams.id"), nullable=True)
-    grid_target_w = Column(Integer, default=640)    # desired grid width
-    grid_target_h = Column(Integer, default=360)    # desired grid height
-    full_target_w = Column(Integer, default=1920)   # desired full width
-    full_target_h = Column(Integer, default=1080)   # desired full height
+    grid_target_w = Column(Integer, default=640)
+    grid_target_h = Column(Integer, default=360)
+    full_target_w = Column(Integer, default=1920)
+    full_target_h = Column(Integer, default=1080)
 
-    streams = relationship("CameraStream", back_populates="camera", cascade="all, delete-orphan", lazy="joined")
+    # IMPORTANT: disambiguate the relationships
+    streams = relationship(
+        "CameraStream",
+        back_populates="camera",
+        cascade="all, delete-orphan",
+        foreign_keys="CameraStream.camera_id",   # <-- this is the FK for the collection
+        lazy="joined",
+    )
+
+    preferred_low_stream = relationship(
+        "CameraStream",
+        foreign_keys=[preferred_low_stream_id],  # <-- distinct FK link
+        post_update=True,                        # resolves circular dependency on UPDATE
+        uselist=False,
+    )
+    preferred_high_stream = relationship(
+        "CameraStream",
+        foreign_keys=[preferred_high_stream_id],
+        post_update=True,
+        uselist=False,
+    )
+
 
 class CameraStream(Base):
     __tablename__ = "camera_streams"
@@ -44,4 +65,9 @@ class CameraStream(Base):
     bitrate_kbps = Column(Integer, nullable=True)
     probed_at = Column(DateTime, nullable=True)
 
-    camera = relationship("Camera", back_populates="streams")
+    # IMPORTANT: disambiguate backref to parent
+    camera = relationship(
+        "Camera",
+        back_populates="streams",
+        foreign_keys=[camera_id],                # <-- this is the FK for this side
+    )
