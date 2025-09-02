@@ -15,6 +15,14 @@ class CameraUpdate(BaseModel):
     high_crf: Optional[int] = None
     low_crf: Optional[int] = None
 
+    # These must be present:
+    preferred_low_stream_id: Optional[int] = None
+    preferred_high_stream_id: Optional[int] = None
+    grid_target_w: Optional[int] = None
+    grid_target_h: Optional[int] = None
+    full_target_w: Optional[int] = None
+    full_target_h: Optional[int] = None
+
 # Streams (admin)
 class CameraStreamCreate(BaseModel):
     name: str
