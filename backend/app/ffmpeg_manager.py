@@ -15,6 +15,37 @@ if not logger.handlers:
     logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
                         format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
 
+def _spawn(cmd: list[str], log_path: Path) -> subprocess.Popen:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logf = open(log_path, "ab", buffering=0)
+    logger.debug("FFmpeg cmd: %s", " ".join(str(x) for x in cmd))
+    logger.info("FFmpeg stderr log: %s", log_path)
+    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=logf)
+
+def _hls_low_options(seg_dur="2", list_size="12"):
+    # common HLS opts for low branch (atomic segments, no-cache)
+    return [
+        "-f", "hls",
+        "-hls_time", seg_dur,
+        "-hls_list_size", list_size,
+        "-hls_allow_cache", "0",
+        "-hls_flags", "delete_segments+independent_segments+append_list+temp_file",
+    ]
+
+def _low_encoder_opts(low_crf: int, grid_w: int | None, grid_h: int | None):
+    # Encoder opts for low branch. Scale only if an explicit grid target is provided.
+    opts = [
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(low_crf),
+        "-g", "48", "-sc_threshold", "0",
+        "-maxrate", "1200k", "-bufsize", "1200k",
+        "-an",
+    ]
+    if grid_w and grid_h and grid_w > 0 and grid_h > 0:
+        opts = ["-vf", f"scale={grid_w}:{grid_h}",
+                "-force_key_frames", f"expr:gte(t,n_forced*2)"] + opts
+    else:
+        opts = ["-force_key_frames", f"expr:gte(t,n_forced*2)"] + opts
+    return opts    
 
 class FFmpegManager:
     """
@@ -30,7 +61,7 @@ class FFmpegManager:
     def __init__(self):
         # cam_id -> subprocess.Popen
         self._procs: Dict[int, subprocess.Popen] = {}
-
+    
     def _ensure_live_dirs(self, cam_name: str) -> None:
         (LIVE_DIR / cam_name / "low").mkdir(parents=True, exist_ok=True)
         (LIVE_DIR / cam_name / "high").mkdir(parents=True, exist_ok=True)
@@ -234,35 +265,198 @@ class FFmpegManager:
                           low_src:str, high_src:str, same_source:bool,
                           grid_w:int, grid_h:int,
                           low_crf:int, high_crf:int):
-        logger.info("camera_dual grid_w=%s grid_h=%s", grid_w, grid_h) 
+        # stop any existing
         self.stop_camera(cam_id)
+    
+        mode = (settings.STREAM_MODE or "all").lower()
+    
+        if mode == "low":
+            # Live-only low stream, no high, no recordings
+            if same_source:
+                # single input: map video only and scale to grid target
+                return self._start_single_low_only_from_src(
+                    cam_id, cam_name, src=low_src, grid_w=grid_w, grid_h=grid_h, low_crf=low_crf
+                )
+            else:
+                # dual inputs: use the low substream as-is (no scale)
+                return self._start_low_only(cam_id, cam_name, low_src, low_crf)
+    
+        # STREAM_MODE=all → full behavior
         if same_source:
-            # Single input => split to high + low; scale low to grid target
             return self._start_single_with_split(
                 cam_id, cam_name, src=high_src,
                 low_scale_w=grid_w, low_scale_h=grid_h,
                 low_crf=low_crf, high_crf=high_crf
             )
         else:
-            # Dual inputs:
-            # Low = its own process, NO scale (use camera sub-stream as-is)
             self._start_low_only(cam_id, cam_name, low_src, low_crf)
-            # High + recordings = its own process
-            self._start_high_and_record(cam_id, cam_name, high_src, high_crf)    
+            self._start_high_and_record(cam_id, cam_name, high_src, high_crf)
 
-    def _start_single_with_split(self, cam_id, cam_name, src, low_scale_w, low_scale_h, low_crf, high_crf):
-        # filter_complex should be:
-        #   [0:v]split=2[vhi][vtmp];[vtmp]scale=<low_scale_w>:<low_scale_h>[vlow]
-        # (NO 640:-1 anywhere)
-        ...
-            
-    def _start_low_only(self, cam_id, cam_name, rtsp_url, low_w, low_h, low_crf):
-        # like your low branch, its own process writing /live/<cam>/low/*
-        # (Implement mirroring the low HLS portion of start_camera with single input)
-        pass
+    # ===================== SINGLE INPUT: split to low + high + recordings =====================
+    def _start_single_with_split(self,
+                                 cam_id: int, cam_name: str, *,
+                                 src: str,
+                                 low_scale_w: int, low_scale_h: int,
+                                 low_crf: int, high_crf: int) -> None:
+        """One ffmpeg taking one RTSP input, fanning out to low HLS (scaled),
+           high HLS (av), and MP4 recordings."""
+        self._ensure_live_dirs(cam_name)
+        self._ensure_rec_date_hour(cam_name)
+    
+        low_dir = LIVE_DIR / cam_name / "low"
+        high_dir = LIVE_DIR / cam_name / "high"
+        rec_base = REC_DIR / cam_name
+        log_path = LIVE_DIR / cam_name / "ffmpeg_single.log"
+    
+        seg_dur = "2"
+    
+        # Filter graph: split decoded video; scale the low branch to target
+        filter_graph = f"[0:v]split=2[vhi][vtmp];[vtmp]scale={low_scale_w}:{low_scale_h}[vlow]"
+    
+        cmd = [
+            "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "warning",
+            "-rtsp_transport", "tcp",
+            "-i", src,
+            "-fflags", "+genpts",
+            "-filter_complex", filter_graph,
+    
+            # ---- LOW (video-only HLS) ----
+            "-map", "[vlow]",
+            * _low_encoder_opts(low_crf, None, None),  # already scaled in filtergraph
+            * _hls_low_options(seg_dur, "12"),
+            "-hls_segment_filename", str(low_dir / "segment_%06d.ts"),
+            str(low_dir / "index.m3u8"),
+    
+            # ---- HIGH (av HLS) ----
+            "-map", "[vhi]", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", str(high_crf),
+            "-g", "48", "-sc_threshold", "0",
+            "-force_key_frames", f"expr:gte(t,n_forced*{seg_dur})",
+            "-maxrate", "4000k", "-bufsize", "4000k",
+            "-c:a", "aac", "-ar", "44100", "-ac", "1",
+            * _hls_low_options(seg_dur, "12"),
+            "-hls_segment_filename", str(high_dir / "segment_%06d.ts"),
+            str(high_dir / "index.m3u8"),
+    
+            # ---- RECORDINGS (MP4 segmented) ----
+            "-map", "0:v", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", str(max(18, min(28, high_crf))),
+            "-c:a", "aac", "-b:a", "128k",
+            "-f", "segment",
+            "-segment_time", str(settings.RECORDING_SEGMENT_SEC),
+            "-reset_timestamps", "1",
+            "-strftime", "1",
+            str(rec_base / "%Y-%m-%d/%H/%Y-%m-%d_%H-%M-%S.mp4"),
+        ]
+    
+        p = _spawn(cmd, log_path)
+        self._procs[cam_id] = [p]
+    
+    # ===================== DUAL INPUT: low-only HLS (no scale) =====================
+    def _start_low_only(self,
+                        cam_id: int, cam_name: str, rtsp_url: str, low_crf: int,
+                        grid_w: int | None = None, grid_h: int | None = None) -> subprocess.Popen:
+        """Low HLS from a separate RTSP substream. Do NOT scale (use camera’s substream)."""
+        self._ensure_live_dirs(cam_name)
+        low_dir = LIVE_DIR / cam_name / "low"
+        log_path = LIVE_DIR / cam_name / "ffmpeg_low.log"
+        seg_dur = "2"
+    
+        # NO filtergraph; map video only; no scale
+        cmd = [
+            "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "warning",
+            "-rtsp_transport", "tcp",
+            "-i", rtsp_url,
+            "-fflags", "+genpts",
+    
+            "-map", "0:v",
+            # even though we don't scale, keep encoder CRF/preset and keyframe alignment
+            * _low_encoder_opts(low_crf, None, None),
+            * _hls_low_options(seg_dur, "12"),
+            "-hls_segment_filename", str(low_dir / "segment_%06d.ts"),
+            str(low_dir / "index.m3u8"),
+        ]
+        p = _spawn(cmd, log_path)
+        self._procs.setdefault(cam_id, []).append(p)
+        return p
+        
+    def _start_single_low_only_from_src(self, cam_id:int, cam_name:str, *, src:str,
+                                        grid_w:int, grid_h:int, low_crf:int):
+        """Single input, LOW HLS only (scaled to grid target), no high, no recordings."""
+        self._ensure_live_dirs(cam_name)
+        low_dir = LIVE_DIR / cam_name / "low"
+        log_path = LIVE_DIR / cam_name / "ffmpeg_low_single.log"
+        seg_dur = "2"
+    
+        # Scale directly with -vf (no filter_complex)
+        cmd = [
+            "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "warning",
+            "-rtsp_transport", "tcp",
+            "-i", src,
+            "-fflags", "+genpts",
+    
+            "-map", "0:v",
+            "-vf", f"scale={grid_w}:{grid_h}",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", str(low_crf),
+            "-g", "48", "-sc_threshold", "0",
+            "-force_key_frames", f"expr:gte(t,n_forced*{seg_dur})",
+            "-maxrate", "1200k", "-bufsize", "1200k",
+            "-an",
+            "-f", "hls",
+            "-hls_time", seg_dur,
+            "-hls_list_size", "12",
+            "-hls_allow_cache", "0",
+            "-hls_flags", "delete_segments+independent_segments+append_list+temp_file",
+            "-hls_segment_filename", str(low_dir / "segment_%06d.ts"),
+            str(low_dir / "index.m3u8"),
+        ]
+        p = _spawn(cmd, log_path)
+        self._procs.setdefault(cam_id, []).append(p)
+        return p
+    
+    # ===================== DUAL INPUT: high HLS + recordings (same input) =====================
+    def _start_high_and_record(self,
+                               cam_id: int, cam_name: str, rtsp_url: str, high_crf: int) -> subprocess.Popen:
+        """High HLS (av) and MP4 recordings from a separate RTSP stream."""
+        self._ensure_live_dirs(cam_name)
+        self._ensure_rec_date_hour(cam_name)
+    
+        high_dir = LIVE_DIR / cam_name / "high"
+        rec_base = REC_DIR / cam_name
+        log_path = LIVE_DIR / cam_name / "ffmpeg_highrec.log"
+        seg_dur = "2"
+    
+        cmd = [
+            "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "warning",
+            "-rtsp_transport", "tcp",
+            "-i", rtsp_url,
+            "-fflags", "+genpts",
+    
+            # ---- HIGH HLS (av) ----
+            "-map", "0:v", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", str(high_crf),
+            "-g", "48", "-sc_threshold", "0",
+            "-force_key_frames", f"expr:gte(t,n_forced*{seg_dur})",
+            "-maxrate", "4000k", "-bufsize", "4000k",
+            "-c:a", "aac", "-ar", "44100", "-ac", "1",
+            * _hls_low_options(seg_dur, "12"),
+            "-hls_segment_filename", str(high_dir / "segment_%06d.ts"),
+            str(high_dir / "index.m3u8"),
+    
+            # ---- RECORDINGS ----
+            "-map", "0:v", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", str(max(18, min(28, high_crf))),
+            "-c:a", "aac", "-b:a", "128k",
+            "-f", "segment",
+            "-segment_time", str(settings.RECORDING_SEGMENT_SEC),
+            "-reset_timestamps", "1",
+            "-strftime", "1",
+            str(rec_base / "%Y-%m-%d/%H/%Y-%m-%d_%H-%M-%S.mp4"),
+        ]
+    
+        p = _spawn(cmd, log_path)
+        self._procs.setdefault(cam_id, []).append(p)
+        return p
 
-    def _start_high_and_record(self, cam_id, cam_name, rtsp_url, high_crf):
-        # like your high HLS + recordings, its own process
-        pass    
 ffmpeg_manager = FFmpegManager()
 

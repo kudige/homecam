@@ -77,24 +77,43 @@ def pick_best_stream(cam: Camera, want_w: int, want_h: int):
 @app.on_event("startup")
 def autostart_cameras() -> None:
     """
-    Auto-start any camera with recordings enabled (retention_days > 0).
+    Auto-start any camera with recordings enabled (retention_days > 0)
+    using dual/single source selection and grid/full targets.
     """
     session = SessionLocal()
     try:
-        cams: List[Camera] = session.query(Camera).filter(Camera.retention_days > 0).all()
+        cams: list[Camera] = session.query(Camera).filter(Camera.retention_days > 0).all()
         for cam in cams:
-            ffmpeg_manager.start_camera(
-                cam.id,
-                cam.name,
-                cam.rtsp_url,
-                cam.low_width,
-                cam.low_height,
-                cam.low_crf,
-                cam.high_crf,
+            # Resolve preferred streams if set; otherwise auto-pick based on targets
+            low_stream = next((s for s in cam.streams if s.id == cam.preferred_low_stream_id), None)
+            high_stream = next((s for s in cam.streams if s.id == cam.preferred_high_stream_id), None)
+
+            if not low_stream:
+                low_stream = pick_best_stream(cam, cam.grid_target_w or 640, cam.grid_target_h or 360)
+            if not high_stream:
+                high_stream = pick_best_stream(cam, cam.full_target_w or 1920, cam.full_target_h or 1080)
+
+            low_url = (low_stream.rtsp_url if low_stream else cam.rtsp_url)
+            high_url = (high_stream.rtsp_url if high_stream else cam.rtsp_url)
+
+            same_source = (low_url == high_url)
+
+            print(f"[AUTOSTART] {cam.name}: same_source={same_source} grid={cam.grid_target_w}x{cam.grid_target_h}")
+
+            # IMPORTANT: pass grid target to FFmpeg manager; do NOT use legacy low_width/low_height
+            ffmpeg_manager.start_camera_dual(
+                cam_id=cam.id,
+                cam_name=cam.name,
+                low_src=low_url,
+                high_src=high_url,
+                same_source=same_source,
+                grid_w=cam.grid_target_w or 640,
+                grid_h=cam.grid_target_h or 360,
+                low_crf=cam.low_crf,
+                high_crf=cam.high_crf,
             )
     finally:
         session.close()
-
 
 # ----------------------------- Admin API (with RTSP) ------------------------------
 
@@ -117,18 +136,54 @@ def admin_create_camera(body: CameraCreate, session: Session = Depends(get_sessi
     session.refresh(cam)
     return cam
 
-
 @app.put("/api/admin/cameras/{cam_id}", response_model=CameraAdminOut)
 def admin_update_camera(cam_id: int, body: CameraUpdate, session: Session = Depends(get_session)):
     cam = session.get(Camera, cam_id)
     if not cam:
         raise HTTPException(404, "Not found")
+
+    old_ret = cam.retention_days or 0
+
     for f, v in body.dict(exclude_unset=True).items():
         setattr(cam, f, v)
     session.commit()
     session.refresh(cam)
-    return cam
 
+    new_ret = cam.retention_days or 0
+
+    # If recordings were enabled and are now disabled:
+    if old_ret > 0 and new_ret <= 0:
+        # OPTION A (recommended): live-only reconfigure
+        # Resolve preferred/auto streams (same as in start)
+        low_stream = next((s for s in cam.streams if s.id == cam.preferred_low_stream_id), None)
+        high_stream = next((s for s in cam.streams if s.id == cam.preferred_high_stream_id), None)
+
+        if not low_stream:
+            low_stream = pick_best_stream(cam, cam.grid_target_w or 640, cam.grid_target_h or 360)
+        if not high_stream:
+            high_stream = pick_best_stream(cam, cam.full_target_w or 1920, cam.full_target_h or 1080)
+
+        low_url = (low_stream.rtsp_url if low_stream else cam.rtsp_url)
+        high_url = (high_stream.rtsp_url if high_stream else cam.rtsp_url)
+        same_source = (low_url == high_url)
+
+        # Restart camera in live-only mode according to STREAM_MODE
+        ffmpeg_manager.start_camera_dual(
+            cam_id=cam.id,
+            cam_name=cam.name,
+            low_src=low_url,
+            high_src=high_url,
+            same_source=same_source,
+            grid_w=cam.grid_target_w or 640,
+            grid_h=cam.grid_target_h or 360,
+            low_crf=cam.low_crf,
+            high_crf=cam.high_crf,
+        )
+
+        # OPTION B (alternative): stop everything instead
+        # ffmpeg_manager.stop_camera(cam.id)
+
+    return cam
 
 @app.delete("/api/admin/cameras/{cam_id}")
 def admin_delete_camera(cam_id: int, session: Session = Depends(get_session)):
