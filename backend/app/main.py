@@ -13,7 +13,7 @@ import datetime as dt
 
 
 from .db import Base, engine, get_session, SessionLocal
-from .models import Camera
+from .models import RoleMode, CameraStream, Camera
 from .schemas import (
     CameraCreate,
     CameraUpdate,
@@ -52,6 +52,57 @@ app.mount("/media", StaticFiles(directory=str(MEDIA_ROOT)), name="media")
 
 # Background retention loop (daily)
 threading.Thread(target=run_retention_loop, args=(get_session,), daemon=True).start()
+
+def _best_stream_for(cam: Camera, target_w: int, target_h: int) -> CameraStream|None:
+    cands = [s for s in cam.streams if s.enabled and s.width and s.height]
+    if not cands: return None
+    def score(s):
+        over = max(0,s.width-target_w)+max(0,s.height-target_h)
+        under= max(0,target_w-s.width)+max(0,target_h-s.height)
+        return (0 if over>0 else 1, over if over>0 else under, -(s.width*s.height))
+    return sorted(cands, key=score)[0]
+
+def _resolve_role(cam: Camera, role: str):
+    """
+    Returns (rtsp_url, scale_w, scale_h, run) for role in ["grid","medium","high","recording"].
+    Scaling only when role='grid' and mode='auto' AND needed to match grid_target_*; otherwise None.
+    run=False if role disabled, or recording disabled by retention.
+    """
+    # select mode/stream/targets per role
+    if role == "grid":
+        mode, sel = cam.grid_mode, cam.grid_stream
+        if mode == RoleMode.manual and sel:
+            return (sel.rtsp_url, None, None, True)
+        # auto: pick best; may scale to grid_target_*
+        pick = _best_stream_for(cam, cam.grid_target_w, cam.grid_target_h) or cam.streams[0] if cam.streams else None
+        if not pick: return (cam.rtsp_url, cam.grid_target_w, cam.grid_target_h, True)
+        # scale only if not exact match
+        if pick.width == cam.grid_target_w and pick.height == cam.grid_target_h:
+            return (pick.rtsp_url, None, None, True)
+        return (pick.rtsp_url, cam.grid_target_w, cam.grid_target_h, True)
+
+    if role == "medium":
+        if cam.medium_mode == RoleMode.disabled: return (None,None,None,False)
+        if cam.medium_mode == RoleMode.manual and cam.medium_stream: return (cam.medium_stream.rtsp_url, None, None, True)
+        pick = _best_stream_for(cam, cam.grid_target_w*2, cam.grid_target_h*2) or cam.streams[0] if cam.streams else None
+        return ((pick.rtsp_url if pick else cam.rtsp_url), None, None, True)
+
+    if role == "high":
+        if cam.high_mode == RoleMode.disabled: return (None,None,None,False)
+        if cam.high_mode == RoleMode.manual and cam.high_stream: return (cam.high_stream.rtsp_url, None, None, True)
+        # choose largest stream
+        pick = max([s for s in cam.streams if s.enabled and s.width and s.height], key=lambda s: s.width*s.height, default=None)
+        return ((pick.rtsp_url if pick else cam.rtsp_url), None, None, True)
+
+    if role == "recording":
+        if cam.retention_days <= 0 or cam.recording_mode == RoleMode.disabled: return (None,None,None,False)
+        if cam.recording_mode == RoleMode.manual and cam.recording_stream:
+            return (cam.recording_stream.rtsp_url, None, None, True)
+        # default to high (largest)
+        pick = max([s for s in cam.streams if s.enabled and s.width and s.height], key=lambda s: s.width*s.height, default=None)
+        return ((pick.rtsp_url if pick else cam.rtsp_url), None, None, True)
+
+    return (None,None,None,False)
 
 def pick_best_stream(cam: Camera, want_w: int, want_h: int):
     """
@@ -124,16 +175,18 @@ def admin_list_cameras(session: Session = Depends(get_session)):
 
 @app.post("/api/admin/cameras", response_model=CameraAdminOut)
 def admin_create_camera(body: CameraCreate, session: Session = Depends(get_session)):
-    if session.query(Camera).filter(Camera.name == body.name).first():
-        raise HTTPException(400, "Camera name exists")
+    # backend/app/main.py (inside admin_create_camera)
     cam = Camera(
         name=body.name,
         rtsp_url=body.rtsp_url,
         retention_days=body.retention_days or settings.DEFAULT_RETENTION_DAYS,
     )
-    session.add(cam)
-    session.commit()
-    session.refresh(cam)
+    session.add(cam); session.commit(); session.refresh(cam)
+    
+    # seed master stream
+    from .models import CameraStream
+    master = CameraStream(camera_id=cam.id, name="master", rtsp_url=cam.rtsp_url, enabled=True, is_master=True)
+    session.add(master); session.commit(); session.refresh(cam)
     return cam
 
 @app.put("/api/admin/cameras/{cam_id}", response_model=CameraAdminOut)
