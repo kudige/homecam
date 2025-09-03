@@ -7,20 +7,20 @@ import os
 from sqlalchemy.orm import Session
 import threading
 from typing import List
+from .models import CameraStream
 from .schemas import CameraStreamCreate, CameraStreamOut
 from .ffprobe_utils import probe_rtsp
+from .roles import resolve_role
 import datetime as dt
 
 
 from .db import Base, engine, get_session, SessionLocal
 from .models import RoleMode, CameraStream, Camera
 from .schemas import (
-    CameraCreate,
-    CameraUpdate,
-    CameraAdminOut,
-    CameraClientOut,
-    CameraClientItem,
-    CameraClientList,
+    CameraCreate, CameraUpdate,
+    CameraStreamCreate, CameraStreamOut,
+    CameraRoleUpdate, CameraAdminOut,
+    CameraClientItem, CameraClientList,
     RecordingFile,
 )
 from .ffmpeg_manager import ffmpeg_manager
@@ -53,56 +53,19 @@ app.mount("/media", StaticFiles(directory=str(MEDIA_ROOT)), name="media")
 # Background retention loop (daily)
 threading.Thread(target=run_retention_loop, args=(get_session,), daemon=True).start()
 
-def _best_stream_for(cam: Camera, target_w: int, target_h: int) -> CameraStream|None:
-    cands = [s for s in cam.streams if s.enabled and s.width and s.height]
-    if not cands: return None
-    def score(s):
-        over = max(0,s.width-target_w)+max(0,s.height-target_h)
-        under= max(0,target_w-s.width)+max(0,target_h-s.height)
-        return (0 if over>0 else 1, over if over>0 else under, -(s.width*s.height))
-    return sorted(cands, key=score)[0]
-
-def _resolve_role(cam: Camera, role: str):
-    """
-    Returns (rtsp_url, scale_w, scale_h, run) for role in ["grid","medium","high","recording"].
-    Scaling only when role='grid' and mode='auto' AND needed to match grid_target_*; otherwise None.
-    run=False if role disabled, or recording disabled by retention.
-    """
-    # select mode/stream/targets per role
-    if role == "grid":
-        mode, sel = cam.grid_mode, cam.grid_stream
-        if mode == RoleMode.manual and sel:
-            return (sel.rtsp_url, None, None, True)
-        # auto: pick best; may scale to grid_target_*
-        pick = _best_stream_for(cam, cam.grid_target_w, cam.grid_target_h) or cam.streams[0] if cam.streams else None
-        if not pick: return (cam.rtsp_url, cam.grid_target_w, cam.grid_target_h, True)
-        # scale only if not exact match
-        if pick.width == cam.grid_target_w and pick.height == cam.grid_target_h:
-            return (pick.rtsp_url, None, None, True)
-        return (pick.rtsp_url, cam.grid_target_w, cam.grid_target_h, True)
-
-    if role == "medium":
-        if cam.medium_mode == RoleMode.disabled: return (None,None,None,False)
-        if cam.medium_mode == RoleMode.manual and cam.medium_stream: return (cam.medium_stream.rtsp_url, None, None, True)
-        pick = _best_stream_for(cam, cam.grid_target_w*2, cam.grid_target_h*2) or cam.streams[0] if cam.streams else None
-        return ((pick.rtsp_url if pick else cam.rtsp_url), None, None, True)
-
-    if role == "high":
-        if cam.high_mode == RoleMode.disabled: return (None,None,None,False)
-        if cam.high_mode == RoleMode.manual and cam.high_stream: return (cam.high_stream.rtsp_url, None, None, True)
-        # choose largest stream
-        pick = max([s for s in cam.streams if s.enabled and s.width and s.height], key=lambda s: s.width*s.height, default=None)
-        return ((pick.rtsp_url if pick else cam.rtsp_url), None, None, True)
-
-    if role == "recording":
-        if cam.retention_days <= 0 or cam.recording_mode == RoleMode.disabled: return (None,None,None,False)
-        if cam.recording_mode == RoleMode.manual and cam.recording_stream:
-            return (cam.recording_stream.rtsp_url, None, None, True)
-        # default to high (largest)
-        pick = max([s for s in cam.streams if s.enabled and s.width and s.height], key=lambda s: s.width*s.height, default=None)
-        return ((pick.rtsp_url if pick else cam.rtsp_url), None, None, True)
-
-    return (None,None,None,False)
+def ensure_stream_probed(session: Session, s: CameraStream) -> CameraStream:
+    """If stream has no width/height, run ffprobe and persist metadata."""
+    if s.width and s.height:
+        return s
+    meta = probe_rtsp(s.rtsp_url)
+    s.width = meta.get("width")
+    s.height = meta.get("height")
+    s.fps = meta.get("fps")
+    s.bitrate_kbps = meta.get("bitrate_kbps")
+    s.probed_at = meta.get("probed_at") or dt.datetime.utcnow()
+    session.commit()
+    session.refresh(s)
+    return s
 
 def pick_best_stream(cam: Camera, want_w: int, want_h: int):
     """
@@ -125,46 +88,94 @@ def pick_best_stream(cam: Camera, want_w: int, want_h: int):
     return sorted(candidates, key=score)[0]
 
 # ----------------------------- Startup: autostart --------------------------------
+# backend/app/main.py
 @app.on_event("startup")
-def autostart_cameras() -> None:
-    """
-    Auto-start any camera with recordings enabled (retention_days > 0)
-    using dual/single source selection and grid/full targets.
-    """
-    session = SessionLocal()
+def autostart():
+    s = SessionLocal()
     try:
-        cams: list[Camera] = session.query(Camera).filter(Camera.retention_days > 0).all()
+        cams = s.query(Camera).all()
         for cam in cams:
-            # Resolve preferred streams if set; otherwise auto-pick based on targets
-            low_stream = next((s for s in cam.streams if s.id == cam.preferred_low_stream_id), None)
-            high_stream = next((s for s in cam.streams if s.id == cam.preferred_high_stream_id), None)
+            ffmpeg_manager.start_by_config(cam)
+            if cam.retention_days > 0:
+                src, sw, sh, run = resolve_role(cam,"recording")
+                if run and src: ffmpeg_manager.start_role(cam.id, cam.name, "recording", src, cam.high_crf)
+    finally: s.close()
 
-            if not low_stream:
-                low_stream = pick_best_stream(cam, cam.grid_target_w or 640, cam.grid_target_h or 360)
-            if not high_stream:
-                high_stream = pick_best_stream(cam, cam.full_target_w or 1920, cam.full_target_h or 1080)
+@app.put("/api/admin/cameras/{cam_id}/roles", response_model=CameraAdminOut)
+def admin_update_roles(cam_id:int, body:CameraRoleUpdate, session:Session=Depends(get_session)):
+    cam = session.get(Camera, cam_id)
+    if not cam: raise HTTPException(404,"Not found")
+    old_ret = cam.retention_days or 0
+    # apply fields
+    for f,v in body.dict(exclude_unset=True).items(): setattr(cam,f,v)
+    session.commit(); session.refresh(cam)
 
-            low_url = (low_stream.rtsp_url if low_stream else cam.rtsp_url)
-            high_url = (high_stream.rtsp_url if high_stream else cam.rtsp_url)
+    # After loading cam and applying body fields…
+    # If a manual stream was selected, ensure it's probed so UI & logic see WxH
+    man_low_id  = body.grid_stream_id if (body.grid_mode == RoleMode.manual) else None
+    man_med_id  = body.medium_stream_id if (body.medium_mode == RoleMode.manual) else None
+    man_high_id = body.high_stream_id if (body.high_mode == RoleMode.manual) else None
+    man_rec_id  = body.recording_stream_id if (body.recording_mode == RoleMode.manual) else None
+    
+    def _probe_id(stream_id):
+        if not stream_id: return
+        s = session.get(CameraStream, int(stream_id))
+        if s and s.camera_id == cam.id:
+            try:
+                ensure_stream_probed(session, s)
+            except Exception as e:
+                print(f"[probe] failed for stream {s.id}: {e}")
+    
+    _probe_id(man_low_id); _probe_id(man_med_id); _probe_id(man_high_id); _probe_id(man_rec_id)
+    
+    # If GRID is manual and a stream chosen, snap grid_target_* to that stream's native WxH
+    if body.grid_mode == RoleMode.manual and body.grid_stream_id:
+        s = session.get(CameraStream, int(body.grid_stream_id))
+        if s and s.width and s.height:
+            cam.grid_target_w = s.width
+            cam.grid_target_h = s.height
+            session.commit(); session.refresh(cam)
+    
+    # Now (re)start grid/recording from _resolve_role(cam, ...)
 
-            same_source = (low_url == high_url)
+    # if grid config changed, restart grid
+    if any(k in body.dict(exclude_unset=True) for k in ["grid_mode","grid_stream_id","grid_target_w","grid_target_h"]):
+        src, sw, sh, run = resolve_role(cam,"grid")
+        if run and src: ffmpeg_manager.start_role(cam.id, cam.name, "grid", src, cam.low_crf, sw, sh)
 
-            print(f"[AUTOSTART] {cam.name}: same_source={same_source} grid={cam.grid_target_w}x{cam.grid_target_h}")
+    # adjust recording if retention>0
+    if cam.retention_days>0:
+        src, sw, sh, run = resolve_role(cam,"recording")
+        if run and src: ffmpeg_manager.start_role(cam.id, cam.name, "recording", src, cam.high_crf)
+    else:
+        ffmpeg_manager.stop_role(cam.id,"recording")
 
-            # IMPORTANT: pass grid target to FFmpeg manager; do NOT use legacy low_width/low_height
-            ffmpeg_manager.start_camera_dual(
-                cam_id=cam.id,
-                cam_name=cam.name,
-                low_src=low_url,
-                high_src=high_url,
-                same_source=same_source,
-                grid_w=cam.grid_target_w or 640,
-                grid_h=cam.grid_target_h or 360,
-                low_crf=cam.low_crf,
-                high_crf=cam.high_crf,
-            )
-    finally:
-        session.close()
+    return cam
+
+# Medium/high on-demand controls
+@app.post("/api/admin/cameras/{cam_id}/medium/start")
+def start_medium(cam_id:int, session:Session=Depends(get_session)):
+    cam = session.get(Camera, cam_id);  assert cam
+    src, sw, sh, run = resolve_role(cam,"medium")
+    if not run or not src: return {"ok": False, "reason":"disabled"}
+    ffmpeg_manager.start_role(cam.id, cam.name, "medium", src, cam.low_crf)
+    return {"ok": True}
+
+@app.post("/api/admin/cameras/{cam_id}/medium/stop")
+def stop_medium(cam_id:int):
+    ffmpeg_manager.stop_role(cam_id,"medium"); return {"ok":True}
+
+@app.post("/api/admin/cameras/{cam_id}/high/start")
+def start_high(cam_id:int, session:Session=Depends(get_session)):
+    cam = session.get(Camera, cam_id);  assert cam
+    src, sw, sh, run = resolve_role(cam,"high")
+    if not run or not src: return {"ok": False, "reason":"disabled"}
+    ffmpeg_manager.start_role(cam.id, cam.name, "high", src, cam.high_crf)
+    return {"ok": True}
+
+@app.post("/api/admin/cameras/{cam_id}/high/stop")
+def stop_high(cam_id:int):
+    ffmpeg_manager.stop_role(cam_id,"high"); return {"ok":True}
 
 # ----------------------------- Admin API (with RTSP) ------------------------------
 

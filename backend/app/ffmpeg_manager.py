@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Dict
-
+from .roles import resolve_role
 from .config import LIVE_DIR, REC_DIR, settings
 
 logger = logging.getLogger("homecam.ffmpeg")
@@ -52,15 +52,77 @@ class FFmpegManager:
     def __init__(self):
         self._procs: dict[int, dict[str, subprocess.Popen]] = {}
 
-    def stop_role(self, cam_id:int, role:str):
-        p = (self._procs.get(cam_id) or {}).pop(role, None)
-        if not p: return
-        try:
-            if p.poll() is None:
-                p.send_signal(signal.SIGTERM); p.wait(timeout=5)
-        except: 
-            try: p.kill()
-            except: pass
+    def _ensure_dirs(self, cam_name: str) -> None:
+        (LIVE_DIR / cam_name / "low").mkdir(parents=True, exist_ok=True)
+        (LIVE_DIR / cam_name / "high").mkdir(parents=True, exist_ok=True)
+        (REC_DIR / cam_name).mkdir(parents=True, exist_ok=True)
+
+    # NEW: ensure date/hour dirs exist
+    def _ensure_rec_date_hour(self, cam_name: str) -> None:
+        now = time.localtime()
+        date_dir = REC_DIR / cam_name / time.strftime("%Y-%m-%d", now)
+        hour_dir = date_dir / time.strftime("%H", now)
+        hour_dir.mkdir(parents=True, exist_ok=True)
+
+    # NEW: small maintainer thread to survive hour rollovers
+    def _maintain_rec_dirs(self, cam_id: int, cam_name: str):
+        while True:
+            p = self._procs.get(cam_id)
+            if p is None or p.poll() is not None:
+                return  # process ended
+            now = time.localtime()
+            date_dir = REC_DIR / cam_name / time.strftime("%Y-%m-%d", now)
+            cur_hour = date_dir / time.strftime("%H", now)
+            nxt_epoch = time.mktime(now) + 3600
+            nxt = time.localtime(nxt_epoch)
+            next_hour = (REC_DIR / cam_name / time.strftime("%Y-%m-%d", nxt)) / time.strftime("%H", nxt)
+            cur_hour.mkdir(parents=True, exist_ok=True)
+            next_hour.mkdir(parents=True, exist_ok=True)
+            time.sleep(20)
+        
+    def stop_role(self, cam_id: int, role: str):
+        procs_by_role = self._procs.get(cam_id) or {}
+        p = procs_by_role.pop(role, None)
+        if p:
+            try:
+                if p.poll() is None:
+                    p.send_signal(signal.SIGTERM)
+                    p.wait(timeout=5)
+            except Exception:
+                try:
+                    if p.poll() is None:
+                        p.kill()
+                except Exception:
+                    pass
+        # clean up empty maps
+        if cam_id in self._procs and not self._procs[cam_id]:
+            self._procs.pop(cam_id, None)
+    
+    def stop_camera(self, cam_id: int):
+        """Backward-compatible: stop ALL roles for this camera."""
+        procs_by_role = self._procs.pop(cam_id, {}) or {}
+        for role, p in list(procs_by_role.items()):
+            try:
+                if p and p.poll() is None:
+                    p.send_signal(signal.SIGTERM)
+                    p.wait(timeout=5)
+            except Exception:
+                try:
+                    if p and p.poll() is None:
+                        p.kill()
+                except Exception:
+                    pass
+    
+    def stop_all(self):
+        """Stop everything for all cameras."""
+        for cam_id in list(self._procs.keys()):
+            self.stop_camera(cam_id)
+    
+    def status(self, cam_id: int) -> dict:
+        """Report which roles are running."""
+        procs_by_role = self._procs.get(cam_id) or {}
+        roles = {r: (p is not None and p.poll() is None) for r, p in procs_by_role.items()}
+        return {"running": any(roles.values()), "roles": roles}
 
     def start_role(self, cam_id:int, cam_name:str, role:str, src:str,
                    crf:int, scale_w:int|None=None, scale_h:int|None=None):
@@ -121,7 +183,7 @@ class FFmpegManager:
 
     def start_by_config(self, cam: "Camera"):
         # grid: always on
-        src, sw, sh, run = _resolve_role(cam, "grid")
+        src, sw, sh, run = resolve_role(cam, "grid")
         if run and src: self.start_role(cam.id, cam.name, "grid", src, cam.low_crf, sw, sh)
         # medium/high only on demand (endpoints below)
         # recording: governed by retention and mode; start/stop with retention changes
