@@ -102,99 +102,83 @@ function AdminPanel({ onChanged }){
 
 function CameraAdminRow({ cam, expanded, onToggle, onRefresh }){
   const [streams, setStreams] = useState(Array.isArray(cam.streams) ? cam.streams : [])
-  const [newName, setNewName] = useState('')
-  const [newUrl, setNewUrl] = useState('')
 
-  // Role states (sync from cam)
-  const [gridMode, setGridMode] = useState(cam.grid_mode || 'auto')
-  const [gridStreamId, setGridStreamId] = useState(cam.grid_stream_id ?? '')
+  // Combined role selectors: value is 'auto', 'disabled', or 'stream:<id>'
+  const [gridSel,   setGridSel]   = useState(selFrom(cam.grid_mode, cam.grid_stream_id, false))
+  const [mediumSel, setMediumSel] = useState(selFrom(cam.medium_mode, cam.medium_stream_id, true))
+  const [highSel,   setHighSel]   = useState(selFrom(cam.high_mode, cam.high_stream_id, true))
+  const [recSel,    setRecSel]    = useState(selFrom(cam.recording_mode, cam.recording_stream_id, true))
+
   const [gridW, setGridW] = useState(cam.grid_target_w ?? 640)
   const [gridH, setGridH] = useState(cam.grid_target_h ?? 360)
 
-  const [mediumMode, setMediumMode] = useState(cam.medium_mode || 'auto')
-  const [mediumStreamId, setMediumStreamId] = useState(cam.medium_stream_id ?? '')
-
-  const [highMode, setHighMode] = useState(cam.high_mode || 'auto')
-  const [highStreamId, setHighStreamId] = useState(cam.high_stream_id ?? '')
-
-  const [recMode, setRecMode] = useState(cam.recording_mode || 'auto')
-  const [recStreamId, setRecStreamId] = useState(cam.recording_stream_id ?? '')
-
+  // Role running flags for Medium/High (polled)
+  const [running, setRunning] = useState({ medium:false, high:false })
   useEffect(() => {
-    // resync when cam prop updates
+	if (!expanded) return
+	const poll = async () => {
+      try {
+		const st = await API.getCameraStatusAdmin(cam.id)
+		const roles = st?.roles || {}
+		setRunning({
+          medium: !!roles.medium,
+          high:   !!roles.high,
+		})
+      } catch {
+		// if status call fails, don't flip UI unexpectedly
+      }
+	}
+	poll()
+	const t = setInterval(poll, 5000)
+	return () => clearInterval(t)
+  }, [expanded, cam.id])
+  
+  // Resync from cam
+  useEffect(() => {
     setStreams(Array.isArray(cam.streams) ? cam.streams : [])
-    setGridMode(cam.grid_mode || 'auto')
-    setGridStreamId(cam.grid_stream_id ?? '')
+    setGridSel(selFrom(cam.grid_mode, cam.grid_stream_id, false))
+    setMediumSel(selFrom(cam.medium_mode, cam.medium_stream_id, true))
+    setHighSel(selFrom(cam.high_mode, cam.high_stream_id, true))
+    setRecSel(selFrom(cam.recording_mode, cam.recording_stream_id, true))
     setGridW(cam.grid_target_w ?? 640)
     setGridH(cam.grid_target_h ?? 360)
-    setMediumMode(cam.medium_mode || 'auto')
-    setMediumStreamId(cam.medium_stream_id ?? '')
-    setHighMode(cam.high_mode || 'auto')
-    setHighStreamId(cam.high_stream_id ?? '')
-    setRecMode(cam.recording_mode || 'auto')
-    setRecStreamId(cam.recording_stream_id ?? '')
   }, [cam])
 
-  // Load/refresh streams when expanded
+  // Load/refresh streams on expand (seed first then fetch)
   useEffect(() => {
     if (!expanded) return
-    // seed from cam.streams, then fetch fresh
-    if (Array.isArray(cam.streams) && cam.streams.length && !streams.length) {
-      setStreams(cam.streams)
-    }
-    (async () => { try { setStreams(await API.listStreamsAdmin(cam.id)) } catch {} })()
+    if (Array.isArray(cam.streams) && cam.streams.length && !streams.length) setStreams(cam.streams)
+    ;(async () => { try { setStreams(await API.listStreamsAdmin(cam.id)) } catch {} })()
   }, [expanded, cam.id]) // eslint-disable-line
 
-  async function addStream(){
-    if (!newName || !newUrl) return
-    await API.addStreamAdmin(cam.id, { name: newName, rtsp_url: newUrl })
-    setNewName(''); setNewUrl('')
-    setStreams(await API.listStreamsAdmin(cam.id))
-    await onRefresh()
+  // unified dropdown change handlers
+  async function onChangeGrid(val){
+    setGridSel(val)
+    if (val.startsWith('stream:')){
+      const id = val.split(':')[1]
+      const s = await ensureProbed(cam.id, streams, id, setStreams)
+      if (s && s.width && s.height){ setGridW(s.width); setGridH(s.height) }
+    }
   }
-  async function probeStream(id){
-    await API.probeStreamAdmin(cam.id, id)
-    setStreams(await API.listStreamsAdmin(cam.id))
+  async function onChangeRole(setter, val){
+    setter(val)
+    if (val.startsWith('stream:')){
+      const id = val.split(':')[1]
+      await ensureProbed(cam.id, streams, id, setStreams)
+    }
   }
 
-  // Save roles to backend
-  async function saveRoles(update){
+  async function saveAll(){
     const body = {
-      grid_mode: gridMode, grid_stream_id: gridStreamId === '' ? null : Number(gridStreamId),
-      grid_target_w: Number(gridW), grid_target_h: Number(gridH),
-      medium_mode: mediumMode, medium_stream_id: mediumStreamId === '' ? null : Number(mediumStreamId),
-      high_mode: highMode, high_stream_id: highStreamId === '' ? null : Number(highStreamId),
-      recording_mode: recMode, recording_stream_id: recStreamId === '' ? null : Number(recStreamId),
-      ...update
+      // grid
+      ...bodyFor('grid', gridSel, gridW, gridH),
+      // medium / high / recording
+      ...bodyFor('medium', mediumSel),
+      ...bodyFor('high',   highSel),
+      ...bodyFor('recording', recSel),
     }
     await API.updateRolesAdmin(cam.id, body)
     await onRefresh()
-  }
-
-  async function onPickGridStream(id){
-	setGridStreamId(id)
-	setGridMode('manual')
-	const s = streams.find(x => String(x.id) === String(id))
-	if (!s) return
-	// If not probed yet, probe then refresh streams
-	if (!s.width || !s.height) {
-      await API.probeStreamAdmin(cam.id, s.id)
-      const list = await API.listStreamsAdmin(cam.id)
-      setStreams(list)
-      const s2 = list.find(x => String(x.id) === String(id))
-      if (s2 && s2.width && s2.height) { setGridW(s2.width); setGridH(s2.height) }
-	} else {
-      setGridW(s.width); setGridH(s.height)
-	}
-  }
-
-  async function onPickManual(setId, id){
-	setId(id)
-	const s = streams.find(x => String(x.id) === String(id))
-	if (s && (!s.width || !s.height)) {
-      await API.probeStreamAdmin(cam.id, s.id)
-      setStreams(await API.listStreamsAdmin(cam.id))
-	}
   }
 
   const label = `${cam.name} (id ${cam.id})`
@@ -206,153 +190,211 @@ function CameraAdminRow({ cam, expanded, onToggle, onRefresh }){
           <span className="pill" style={{minWidth:160}}>{label}</span>
         </div>
         <div className="row" style={{gap:8}}>
-          <button className="btn secondary" onClick={()=>API.startMedium(cam.id)}>Start Medium</button>
-          <button className="btn secondary" onClick={()=>API.stopMedium(cam.id)}>Stop Medium</button>
-          <button className="btn secondary" onClick={()=>API.startHigh(cam.id)}>Start High</button>
-          <button className="btn secondary" onClick={()=>API.stopHigh(cam.id)}>Stop High</button>
           <button className="btn secondary" onClick={()=>API.deleteCameraAdmin(cam.id).then(onRefresh)}>Delete</button>
         </div>
       </div>
 
       {expanded && (
         <div style={{marginTop:12, borderTop:'1px solid #1f2630', paddingTop:12}}>
-          {/* Roles */}
-          <div style={{display:'grid', gridTemplateColumns:'180px 1fr 1fr', gap:12, alignItems:'end'}}>
-            {/* GRID */}
-            <RoleRow
+          {/* Roles grid */}
+          <div style={{display:'grid', gridTemplateColumns:'160px 1fr auto', gap:12, alignItems:'end'}}>
+            <RoleLine
               title="Grid (always on)"
-              mode={gridMode}
-              setMode={setGridMode}
-              streamId={gridStreamId}
-              setStreamId={onPickGridStream}
-              allowDisabled={false}
+              value={gridSel}
+              onChange={onChangeGrid}
               streams={streams}
+              allowDisabled={false}
             >
               <div className="row" style={{gap:8}}>
-                <div>
-                  <div style={{fontSize:12, opacity:.8}}>Target W</div>
-                  <input type="number" style={{width:96}} value={gridW} onChange={e=>setGridW(e.target.value)} />
-                </div>
-                <div>
-                  <div style={{fontSize:12, opacity:.8}}>Target H</div>
-                  <input type="number" style={{width:96}} value={gridH} onChange={e=>setGridH(e.target.value)} />
-                </div>
-                <button className="btn" onClick={()=>saveRoles({})}>Save Grid</button>
+                <input type="number" style={{width:96}} value={gridW} onChange={e=>setGridW(e.target.value)} />
+                <input type="number" style={{width:96}} value={gridH} onChange={e=>setGridH(e.target.value)} />
+                <span className="pill">Target WxH</span>
               </div>
-            </RoleRow>
+            </RoleLine>
 
-            {/* MEDIUM */}
-            <RoleRow
-              title="Medium (expanded default)"
-              mode={mediumMode}
-              setMode={setMediumMode}
-              streamId={mediumStreamId}
-			  setStreamId={(id)=>onPickManual(setMediumStreamId, id)}
-              allowDisabled={true}
+            <RoleLine
+              title="Medium"
+              value={mediumSel}
+              onChange={(v)=>onChangeRole(setMediumSel, v)}
               streams={streams}
+              allowDisabled={true}
             >
-              <button className="btn" onClick={()=>saveRoles({})}>Save Medium</button>
-            </RoleRow>
+			  {running.medium
+			   ? <button className="btn secondary" onClick={async ()=>{
+						   await API.stopMedium(cam.id)
+						   const st = await API.getCameraStatusAdmin(cam.id)
+						   setRunning(r => ({...r, medium: !!(st?.roles?.medium)}))
+						 }}>
+				   Stop
+				 </button>
+			   : <button className="btn" onClick={async ()=>{
+						   await API.startMedium(cam.id)
+						   const st = await API.getCameraStatusAdmin(cam.id)
+						   setRunning(r => ({...r, medium: !!(st?.roles?.medium)}))
+						 }}>
+				   Start
+				 </button>}
+            </RoleLine>
 
-            {/* HIGH */}
-            <RoleRow
-              title="High (expanded high-res)"
-              mode={highMode}
-              setMode={setHighMode}
-              streamId={highStreamId}
-			  setStreamId={(id)=>onPickManual(setHighStreamId, id)}
-              allowDisabled={true}
+            <RoleLine
+              title="High"
+              value={highSel}
+              onChange={(v)=>onChangeRole(setHighSel, v)}
               streams={streams}
+              allowDisabled={true}
             >
-              <button className="btn" onClick={()=>saveRoles({})}>Save High</button>
-            </RoleRow>
+			  {running.high
+			   ? <button className="btn secondary" onClick={async ()=>{
+						   await API.stopHigh(cam.id)
+						   const st = await API.getCameraStatusAdmin(cam.id)
+						   setRunning(r => ({...r, high: !!(st?.roles?.high)}))
+						 }}>
+				   Stop
+				 </button>
+			   : <button className="btn" onClick={async ()=>{
+						   await API.startHigh(cam.id)
+						   const st = await API.getCameraStatusAdmin(cam.id)
+						   setRunning(r => ({...r, high: !!(st?.roles?.high)}))
+						 }}>
+				   Start
+				 </button>}
+            </RoleLine>
 
-            {/* RECORDING */}
-            <RoleRow
-              title="Recording (if retention > 0)"
-              mode={recMode}
-              setMode={setRecMode}
-              streamId={recStreamId}
-			  setStreamId={(id)=>onPickManual(setRecStreamId, id)}
-              allowDisabled={true}
+            <RoleLine
+              title="Recording (via retention)"
+              value={recSel}
+              onChange={(v)=>onChangeRole(setRecSel, v)}
               streams={streams}
+              allowDisabled={true}
             >
-              <button className="btn" onClick={()=>saveRoles({})}>Save Recording</button>
-            </RoleRow>
+              <span className="pill">Toggle via retention</span>
+            </RoleLine>
           </div>
 
-          {/* Streams list + Add/Probe */}
-          <div style={{marginTop:16}}>
-            <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:8}}>
-              <div style={{fontWeight:600}}>Streams</div>
-              <button className="btn secondary" onClick={async ()=>setStreams(await API.listStreamsAdmin(cam.id))}>Refresh</button>
-            </div>
-            <div style={{display:'grid', gridTemplateColumns:'1fr 1fr auto auto', gap:8, alignItems:'center'}}>
-              <div style={{opacity:.8, fontSize:12}}>Name</div>
-              <div style={{opacity:.8, fontSize:12}}>RTSP URL</div>
-              <div style={{opacity:.8, fontSize:12}}>Meta</div>
-              <div style={{opacity:.8, fontSize:12}}>Actions</div>
-
-              {streams.map(s => (
-                <React.Fragment key={s.id}>
-                  <div className="pill">{s.name}{s.is_master ? ' • master' : ''}</div>
-                  <input value={s.rtsp_url} readOnly style={{width:'100%'}} />
-                  <div style={{fontSize:12, opacity:.9}}>
-                    {s.width && s.height ? `${s.width}×${s.height}` : '—'}
-                    {s.fps ? ` @ ${s.fps}fps` : ''}{s.bitrate_kbps ? ` • ${s.bitrate_kbps}kbps` : ''}
-                  </div>
-                  <div className="row" style={{gap:8}}>
-                    <button className="btn secondary" onClick={()=>probeStream(s.id)}>Probe</button>
-                  </div>
-                </React.Fragment>
-              ))}
-            </div>
-
-            {/* Add stream */}
-            <div className="row" style={{gap:12, alignItems:'flex-end', marginTop:12, flexWrap:'wrap'}}>
-              <div>
-                <div style={{fontSize:12, opacity:.8}}>New Stream Name</div>
-                <input value={newName} onChange={e=>setNewName(e.target.value)} placeholder="sub/main/720p" />
-              </div>
-              <div style={{flex:1, minWidth:360}}>
-                <div style={{fontSize:12, opacity:.8}}>New Stream RTSP URL</div>
-                <input value={newUrl} onChange={e=>setNewUrl(e.target.value)} placeholder="rtsp://user:pass@host:554/sub" style={{width:'100%'}} />
-              </div>
-              <button className="btn" onClick={addStream}>Add & Probe</button>
-            </div>
+          <div className="row" style={{gap:8, marginTop:12}}>
+            <button className="btn" onClick={saveAll}>Save</button>
+            <button className="btn secondary" onClick={async ()=>setStreams(await API.listStreamsAdmin(cam.id))}>Refresh Streams</button>
           </div>
+
+          {/* Streams table + add */}
+          <StreamsEditor cam={cam} streams={streams} setStreams={setStreams} />
         </div>
       )}
     </div>
   )
 }
 
-function RoleRow({ title, mode, setMode, streamId, setStreamId, allowDisabled, streams, children }){
+/* ---- Helpers for Admin ---- */
+
+// Convert current selector value to role body fields
+function bodyFor(role, sel, gridW, gridH){
+  const isGrid = role === 'grid'
+  if (sel === 'auto') {
+    return isGrid
+      ? { grid_mode:'auto', grid_stream_id:null, grid_target_w:Number(gridW), grid_target_h:Number(gridH) }
+      : { [`${role}_mode`]:'auto', [`${role}_stream_id`]:null }
+  }
+  if (sel === 'disabled') {
+    return isGrid
+      ? { grid_mode:'auto', grid_stream_id:null } // grid can't be disabled; fallback to auto
+      : { [`${role}_mode`]:'disabled', [`${role}_stream_id`]:null }
+  }
+  const id = Number(sel.split(':')[1])
+  return isGrid
+    ? { grid_mode:'manual', grid_stream_id:id, grid_target_w:Number(gridW), grid_target_h:Number(gridH) }
+    : { [`${role}_mode`]:'manual', [`${role}_stream_id`]:id }
+}
+
+// Build select value from mode + stream_id
+function selFrom(mode, streamId, allowDisabled){
+  if (mode === 'manual' && streamId) return `stream:${streamId}`
+  if (mode === 'disabled' && allowDisabled) return 'disabled'
+  return 'auto'
+}
+
+// Ensure a stream is probed; refresh list if needed and return the stream
+async function ensureProbed(camId, streams, id, setStreams){
+  let s = streams.find(x => String(x.id) === String(id))
+  if (s && s.width && s.height) return s
+  await API.probeStreamAdmin(camId, id)
+  const list = await API.listStreamsAdmin(camId)
+  setStreams(list)
+  return list.find(x => String(x.id) === String(id))
+}
+
+/* ---- Small presentational components ---- */
+
+function RoleLine({ title, value, onChange, streams, allowDisabled, children }){
   return (
     <>
       <div style={{fontWeight:600}}>{title}</div>
       <div className="row" style={{gap:8, alignItems:'center'}}>
-        <select value={mode} onChange={e=>setMode(e.target.value)} style={{minWidth:140}}>
+        <select value={value} onChange={e=>onChange(e.target.value)} style={{minWidth:240}}>
           <option value="auto">Auto</option>
           {allowDisabled && <option value="disabled">Disabled</option>}
-          <option value="manual">Manual</option>
-        </select>
-        <select
-          value={streamId}
-          onChange={e=>setStreamId(e.target.value)}
-          style={{minWidth:200}}
-          disabled={mode !== 'manual'}
-        >
-          <option value="">(pick stream)</option>
           {streams.map(s => (
-            <option key={s.id} value={s.id}>
+            <option key={s.id} value={`stream:${s.id}`}>
               {s.name}{s.width && s.height ? ` — ${s.width}×${s.height}` : ''}
             </option>
           ))}
         </select>
       </div>
-      <div className="row" style={{gap:8}}>
-        {children}
+      <div className="row" style={{gap:8}}>{children}</div>
+    </>
+  )
+}
+
+function StreamsEditor({ cam, streams, setStreams }){
+  const [newName, setNewName] = useState('')
+  const [newUrl, setNewUrl]   = useState('')
+
+  async function addStream(){
+    if (!newName || !newUrl) return
+    await API.addStreamAdmin(cam.id, { name:newName, rtsp_url:newUrl })
+    setNewName(''); setNewUrl('')
+    setStreams(await API.listStreamsAdmin(cam.id))
+  }
+  async function probe(id){
+    await API.probeStreamAdmin(cam.id, id)
+    setStreams(await API.listStreamsAdmin(cam.id))
+  }
+
+  return (
+    <>
+      <div style={{marginTop:16}}>
+        <div style={{display:'grid', gridTemplateColumns:'1fr 1fr auto auto', gap:8, alignItems:'center'}}>
+          <div style={{opacity:.8, fontSize:12}}>Name</div>
+          <div style={{opacity:.8, fontSize:12}}>RTSP URL</div>
+          <div style={{opacity:.8, fontSize:12}}>Meta</div>
+          <div style={{opacity:.8, fontSize:12}}>Actions</div>
+
+          {streams.map(s => (
+            <React.Fragment key={s.id}>
+              <div className="pill">{s.name}{s.is_master ? ' • master' : ''}</div>
+              <input value={s.rtsp_url} readOnly style={{width:'100%'}} />
+              <div style={{fontSize:12, opacity:.9}}>
+                {s.width && s.height ? `${s.width}×${s.height}` : '—'}
+                {s.fps ? ` @ ${s.fps}fps` : ''}{s.bitrate_kbps ? ` • ${s.bitrate_kbps}kbps` : ''}
+              </div>
+              <div className="row" style={{gap:8}}>
+                <button className="btn secondary" onClick={()=>probe(s.id)}>Probe</button>
+              </div>
+            </React.Fragment>
+          ))}
+        </div>
+      </div>
+
+      {/* Add stream */}
+      <div className="row" style={{gap:12, alignItems:'flex-end', marginTop:12, flexWrap:'wrap'}}>
+        <div>
+          <div style={{fontSize:12, opacity:.8}}>New Stream Name</div>
+          <input value={newName} onChange={e=>setNewName(e.target.value)} placeholder="sub/main/720p" />
+        </div>
+        <div style={{flex:1, minWidth:360}}>
+          <div style={{fontSize:12, opacity:.8}}>New Stream RTSP URL</div>
+          <input value={newUrl} onChange={e=>setNewUrl(e.target.value)} placeholder="rtsp://user:pass@host:554/sub" style={{width:'100%'}} />
+        </div>
+        <button className="btn" onClick={addStream}>Add & Probe</button>
       </div>
     </>
   )

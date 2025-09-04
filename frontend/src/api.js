@@ -58,6 +58,10 @@ const API = {
     }).then(r => r.json());
   },
 
+  getCameraStatusAdmin(camId) {
+	return fetch(`/api/admin/cameras/${camId}/status`).then(r => r.json());
+  },
+  
   // ADMIN — medium/high on-demand start/stop
   startMedium(camId) { return fetch(`/api/admin/cameras/${camId}/medium/start`, { method: 'POST' }).then(r => r.json()); },
   stopMedium(camId)  { return fetch(`/api/admin/cameras/${camId}/medium/stop`,  { method: 'POST' }).then(r => r.json()); },

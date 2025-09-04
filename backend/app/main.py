@@ -410,3 +410,8 @@ def admin_probe_stream(cam_id: int, stream_id: int, session: Session = Depends(g
     s.fps = meta["fps"]; s.bitrate_kbps = meta["bitrate_kbps"]; s.probed_at = meta["probed_at"]
     session.commit(); session.refresh(s)
     return s
+
+@app.get("/api/admin/cameras/{cam_id}/status")
+def admin_camera_status(cam_id: int):
+    # returns: {"running": bool, "roles": {"grid": bool, "medium": bool, "high": bool, "recording": bool}}
+    return ffmpeg_manager.status(cam_id)
