@@ -56,7 +56,8 @@ class CameraRoleUpdate(BaseModel):
     high_stream_id: Optional[int] = None
     recording_mode: Optional[RoleMode] = None
     recording_stream_id: Optional[int] = None
-
+    retention_days: Optional[int] = None
+    
 class CameraAdminOut(BaseModel):
     id: int
     name: str

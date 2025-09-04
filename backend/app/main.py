@@ -137,11 +137,7 @@ def admin_update_roles(cam_id:int, body:CameraRoleUpdate, session:Session=Depend
             session.commit(); session.refresh(cam)
     
     # Now (re)start grid/recording from _resolve_role(cam, ...)
-
-    # if grid config changed, restart grid
-    if any(k in body.dict(exclude_unset=True) for k in ["grid_mode","grid_stream_id","grid_target_w","grid_target_h"]):
-        src, sw, sh, run = resolve_role(cam,"grid")
-        if run and src: ffmpeg_manager.start_role(cam.id, cam.name, "grid", src, cam.low_crf, sw, sh)
+    ffmpeg_manager.start_by_config(cam, resolve_role)  # will (re)start grid appropriately
 
     # adjust recording if retention>0
     if cam.retention_days>0:

@@ -1,26 +1,28 @@
 # backend/app/ffmpeg_manager.py
 import logging
-import subprocess
+import shutil
 import signal
+import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional, Tuple
 from .roles import resolve_role
+
 from .config import LIVE_DIR, REC_DIR, settings
 
 logger = logging.getLogger("homecam.ffmpeg")
 if not logger.handlers:
-    # Fallback basic config if the app hasn't configured logging yet
-    logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
-                        format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+    logging.basicConfig(
+        level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
 
-# -------- cleanup HLS files when streams are stopped ------- 
-import shutil
+# ----------------------------- helpers -----------------------------
 
-def _alive(p: subprocess.Popen | None) -> bool:
+def _alive(p: Optional[subprocess.Popen]) -> bool:
     return p is not None and p.poll() is None
-    
+
 def _spawn(cmd: list[str], log_path: Path) -> subprocess.Popen:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     logf = open(log_path, "ab", buffering=0)
@@ -28,8 +30,7 @@ def _spawn(cmd: list[str], log_path: Path) -> subprocess.Popen:
     logger.info("FFmpeg stderr log: %s", log_path)
     return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=logf)
 
-def _hls_low_options(seg_dur="2", list_size="12"):
-    # common HLS opts for low branch (atomic segments, no-cache)
+def _hls_opts(seg_dur="2", list_size="12"):
     return [
         "-f", "hls",
         "-hls_time", seg_dur,
@@ -38,71 +39,172 @@ def _hls_low_options(seg_dur="2", list_size="12"):
         "-hls_flags", "delete_segments+independent_segments+append_list+temp_file",
     ]
 
-def _low_encoder_opts(low_crf: int, grid_w: int | None, grid_h: int | None):
-    # Encoder opts for low branch. Scale only if an explicit grid target is provided.
-    opts = [
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(low_crf),
-        "-g", "48", "-sc_threshold", "0",
-        "-maxrate", "1200k", "-bufsize", "1200k",
-        "-an",
-    ]
-    if grid_w and grid_h and grid_w > 0 and grid_h > 0:
-        opts = ["-vf", f"scale={grid_w}:{grid_h}",
-                "-force_key_frames", f"expr:gte(t,n_forced*2)"] + opts
-    else:
-        opts = ["-force_key_frames", f"expr:gte(t,n_forced*2)"] + opts
-    return opts    
+
+# ----------------------------- Lease Tracker -----------------------------
+
+class LeaseTracker:
+    """
+    Tracks 'leases' per (cam_id, role) to decide when a role is in-use.
+    - acquire() -> lease_id
+    - renew()   -> bump last-seen
+    - release() -> drop; when no leases remain, we remember the 'idle_since' time
+    Also exposes counts and last_seen/idle_since for reaper logic.
+    """
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._leases: Dict[Tuple[int, str], Dict[str, float]] = {}
+        self._idle_since: Dict[Tuple[int, str], float] = {}
+        self._last_seen: Dict[Tuple[int, str], float] = {}
+
+    def acquire(self, cam_id: int, role: str) -> str:
+        import uuid
+        lid = uuid.uuid4().hex
+        now = time.time()
+        with self._lock:
+            self._leases.setdefault((cam_id, role), {})[lid] = now
+            self._last_seen[(cam_id, role)] = now
+            # while leased, clear idle_since
+            self._idle_since.pop((cam_id, role), None)
+        return lid
+
+    def renew(self, cam_id: int, role: str, lease_id: str):
+        now = time.time()
+        with self._lock:
+            leases = self._leases.get((cam_id, role))
+            if leases and lease_id in leases:
+                leases[lease_id] = now
+                self._last_seen[(cam_id, role)] = now
+
+    def release(self, cam_id: int, role: str, lease_id: str):
+        with self._lock:
+            leases = self._leases.get((cam_id, role))
+            if leases and leases.pop(lease_id, None) is not None:
+                if not leases:
+                    # became idle now
+                    self._idle_since[(cam_id, role)] = time.time()
+
+    def count(self, cam_id: int, role: str) -> int:
+        with self._lock:
+            return len(self._leases.get((cam_id, role), {}))
+
+    def mark_activity(self, cam_id: int, role: str):
+        """Record activity (e.g., on start); clears idle timer while active."""
+        now = time.time()
+        with self._lock:
+            self._last_seen[(cam_id, role)] = now
+            # do not set idle_since here; only set when last lease is released
+
+    def idle_for(self, cam_id: int, role: str) -> float:
+        """Seconds since idle (no leases). 0 if not idle."""
+        with self._lock:
+            t = self._idle_since.get((cam_id, role))
+            return time.time() - t if t else 0.0
+
+    def snapshot_counts(self, cam_id: int) -> Dict[str, int]:
+        with self._lock:
+            return {
+                r: len(self._leases.get((cam_id, r), {}))
+                for r in ("grid", "medium", "high", "recording")
+            }
+
+
+# ----------------------------- Manager -----------------------------
 
 class FFmpegManager:
-    # store per-cam map of role->proc
+    """
+    Role-based process manager:
+      - Roles: grid (HLS), medium (HLS), high (HLS), recording (MP4 segments)
+      - One ffmpeg per (cam_id, role) max; start is idempotent & race-safe
+      - Leases for medium/high auto-stop when idle > timeout
+      - Cleans HLS files on stop
+    """
+
     def __init__(self):
-        self._procs: dict[int, dict[str, subprocess.Popen]] = {}
         self._lock = threading.Lock()
-        self._inflight: set[tuple[int,str]] = set()  # (cam_id, role) currently starting
-        
-    def _ensure_dirs(self, cam_name: str) -> None:
-        (LIVE_DIR / cam_name / "low").mkdir(parents=True, exist_ok=True)
-        (LIVE_DIR / cam_name / "high").mkdir(parents=True, exist_ok=True)
-        (REC_DIR / cam_name).mkdir(parents=True, exist_ok=True)
+        self._procs: Dict[int, Dict[str, subprocess.Popen]] = {}
+        self._inflight: set[Tuple[int, str]] = set()
+        self._cam_names: Dict[int, str] = {}  # cam_id -> cam_name
+        self._leases = LeaseTracker()
 
-    # NEW: ensure date/hour dirs exist
-    def _ensure_rec_date_hour(self, cam_name: str) -> None:
-        now = time.localtime()
-        date_dir = REC_DIR / cam_name / time.strftime("%Y-%m-%d", now)
-        hour_dir = date_dir / time.strftime("%H", now)
-        hour_dir.mkdir(parents=True, exist_ok=True)
+        threading.Thread(target=self._idle_reaper, daemon=True).start()
 
-    # NEW: small maintainer thread to survive hour rollovers
-    def _maintain_rec_dirs(self, cam_id: int, cam_name: str):
-        while True:
-            p = self._procs.get(cam_id)
-            if p is None or p.poll() is not None:
-                return  # process ended
-            now = time.localtime()
-            date_dir = REC_DIR / cam_name / time.strftime("%Y-%m-%d", now)
-            cur_hour = date_dir / time.strftime("%H", now)
-            nxt_epoch = time.mktime(now) + 3600
-            nxt = time.localtime(nxt_epoch)
-            next_hour = (REC_DIR / cam_name / time.strftime("%Y-%m-%d", nxt)) / time.strftime("%H", nxt)
-            cur_hour.mkdir(parents=True, exist_ok=True)
-            next_hour.mkdir(parents=True, exist_ok=True)
-            time.sleep(20)
-        
-    def _cleanup_live_role(self, cam_name: str, role: str):
-        d = LIVE_DIR / cam_name / role
+    # ---------- public: leases ----------
+
+    def acquire_lease(self, cam_id: int, role: str) -> str:
+        return self._leases.acquire(cam_id, role)
+
+    def renew_lease(self, cam_id: int, role: str, lease_id: str):
+        self._leases.renew(cam_id, role, lease_id)
+
+    def release_lease(self, cam_id: int, role: str, lease_id: str):
+        self._leases.release(cam_id, role, lease_id)
+
+    # ---------- start/stop/status ----------
+
+    def start_role(
+        self,
+        cam_id: int,
+        cam_name: str,
+        role: str,
+        src: str,
+        crf: int,
+        scale_w: Optional[int] = None,
+        scale_h: Optional[int] = None,
+    ):
+        """
+        Safe, idempotent start. Only one ffmpeg per (cam_id, role).
+        """
+        key = (cam_id, role)
+
+        # CS1
+        with self._lock:
+            if key in self._inflight:
+                return {"ok": False, "reason": "start_in_progress"}
+
+            self._inflight.add(key)
+            self._procs.setdefault(cam_id, {})
+            self._cam_names[cam_id] = cam_name  # keep the mapping up-to-date
+
+            existing = self._procs[cam_id].get(role)
+            if _alive(existing):
+                self._inflight.discard(key)
+                return {"ok": True, "already_running": True}
+
+            if existing and not _alive(existing):
+                self._procs[cam_id].pop(role, None)
+
+        # build/spawn outside lock
         try:
-            if d.exists():
-                shutil.rmtree(d)
+            if role == "recording":
+                new_proc = self._start_recording_proc(cam_name, src, crf)
+            else:
+                new_proc = self._start_hls_proc(cam_name, role, src, crf, scale_w, scale_h)
         except Exception:
-            pass
-    
-    def _cleanup_live_all(self, cam_name: str):
-        base = LIVE_DIR / cam_name
-        try:
-            if base.exists():
-                shutil.rmtree(base)
-        except Exception:
-            pass
+            with self._lock:
+                self._inflight.discard(key)
+            raise
+
+        # CS2
+        with self._lock:
+            existing_now = self._procs.get(cam_id, {}).get(role)
+            if _alive(existing_now):
+                # someone else beat us; kill ours
+                try:
+                    if _alive(new_proc):
+                        new_proc.send_signal(signal.SIGTERM); new_proc.wait(timeout=5)
+                except Exception:
+                    try:
+                        if _alive(new_proc): new_proc.kill()
+                    except Exception:
+                        pass
+                self._inflight.discard(key)
+                return {"ok": True, "already_running": True}
+
+            self._procs[cam_id][role] = new_proc
+            self._inflight.discard(key)
+            # mark role active so reaper doesn't stop immediately
+            self._leases.mark_activity(cam_id, role)
+            return {"ok": True}
 
     def stop_role(self, cam_id: int, cam_name: str, role: str):
         with self._lock:
@@ -114,16 +216,16 @@ class FFmpegManager:
                     p.wait(timeout=5)
             except Exception:
                 try:
-                    if _alive(p):
-                        p.kill()
+                    if _alive(p): p.kill()
                 except Exception:
                     pass
-        # Always cleanup the HLS folder for this role
+        # cleanup files
         self._cleanup_live_role(cam_name, role)
-            
+
     def stop_camera(self, cam_id: int, cam_name: str):
         with self._lock:
             procs_by_role = self._procs.pop(cam_id, {}) or {}
+            self._cam_names.pop(cam_id, None)
         for role, p in procs_by_role.items():
             try:
                 if _alive(p):
@@ -131,136 +233,187 @@ class FFmpegManager:
                     p.wait(timeout=5)
             except Exception:
                 try:
-                    if _alive(p):
-                        p.kill()
+                    if _alive(p): p.kill()
                 except Exception:
                     pass
         self._cleanup_live_all(cam_name)
-        
-    def stop_all(self):
-        """Stop everything for all cameras."""
-        for cam_id in list(self._procs.keys()):
-            self.stop_camera(cam_id)
-    
+
     def status(self, cam_id: int) -> dict:
-        """Report which roles are running."""
-        procs_by_role = self._procs.get(cam_id) or {}
-        roles = {r: (p is not None and p.poll() is None) for r, p in procs_by_role.items()}
-        return {"running": any(roles.values()), "roles": roles}
-
-    def start_role(self, cam_id:int, cam_name:str, role:str, src:str,
-                   crf:int, scale_w:int|None=None, scale_h:int|None=None):
-        """
-        Safe, idempotent. Only one ffmpeg per (cam_id, role).
-        If already running, it returns without spawning a new one.
-        """
-        key = (cam_id, role)
-    
-        # First critical section
         with self._lock:
-            if key in self._inflight:
-                return {"ok": False, "reason": "start_in_progress"}
-    
-            self._inflight.add(key)
-            self._procs.setdefault(cam_id, {})
-    
-            existing = self._procs[cam_id].get(role)
-            if existing is not None and existing.poll() is None:
-                # Already running — clear inflight before returning
-                self._inflight.discard(key)
-                return {"ok": True, "already_running": True}
-            # Drop dead proc entry if present
-            if existing is not None and existing.poll() is not None:
-                self._procs[cam_id].pop(role, None)
-    
-        # Build & spawn OUTSIDE the lock
-        try:
-            if role == "recording":
-                new_proc = self._start_recording_proc(cam_name, src, crf)
-            else:
-                new_proc = self._start_hls_proc(cam_name, role, src, crf, scale_w, scale_h)
-        except Exception as e:
-            with self._lock:
-                self._inflight.discard(key)
-            raise
-    
-        # Second critical section: commit proc (double-check)
-        with self._lock:
-            existing_now = self._procs.get(cam_id, {}).get(role)
-            if existing_now is not None and existing_now.poll() is None:
-                # Someone else won the race; kill ours
-                try:
-                    if new_proc.poll() is None:
-                        new_proc.send_signal(signal.SIGTERM)
-                        new_proc.wait(timeout=5)
-                except Exception:
-                    try:
-                        if new_proc.poll() is None:
-                            new_proc.kill()
-                    except Exception:
-                        pass
-                self._inflight.discard(key)
-                return {"ok": True, "already_running": True}
-    
-            self._procs[cam_id][role] = new_proc
-            self._inflight.discard(key)
-            return {"ok": True}
-    
-    def start_by_config(self, cam: "Camera"):
-        # grid: always on
-        src, sw, sh, run = resolve_role(cam, "grid")
-        if run and src: self.start_role(cam.id, cam.name, "grid", src, cam.low_crf, sw, sh)
-        # medium/high only on demand (endpoints below)
-        # recording: governed by retention and mode; start/stop with retention changes
+            procs_by_role = self._procs.get(cam_id) or {}
+            roles = {r: _alive(p) for r, p in procs_by_role.items()}
+        lease_counts = self._leases.snapshot_counts(cam_id)
+        return {"running": any(roles.values()), "roles": roles, "leases": lease_counts}
+        
+    # ---------- spawn routines (no registry writes here) ----------
 
-    def _start_hls_proc(self, cam_name:str, role:str, src:str, crf:int,
-                        scale_w:int|None, scale_h:int|None) -> subprocess.Popen:
+    def _start_hls_proc(
+        self,
+        cam_name: str,
+        role: str,
+        src: str,
+        crf: int,
+        scale_w: Optional[int],
+        scale_h: Optional[int],
+    ) -> subprocess.Popen:
         (LIVE_DIR / cam_name / role).mkdir(parents=True, exist_ok=True)
         out_dir = LIVE_DIR / cam_name / role
         log = LIVE_DIR / cam_name / f"ffmpeg_{role}.log"
         seg = "2"
-    
+
         enc = [
-            "-c:v","libx264","-preset","veryfast","-crf",str(crf),
-            "-g","48","-sc_threshold","0",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+            "-g", "48", "-sc_threshold", "0",
             "-force_key_frames", f"expr:gte(t,n_forced*{seg})",
-            "-maxrate","4000k" if role!="grid" else "1200k",
-            "-bufsize","4000k" if role!="grid" else "1200k",
+            "-maxrate", "4000k" if role != "grid" else "1200k",
+            "-bufsize", "4000k" if role != "grid" else "1200k",
         ]
         vf = []
         if scale_w and scale_h:
-            vf = ["-vf", f"scale={scale_w}:{scale_h}"]
-        audio = ["-an"] if role=="grid" else ["-c:a","aac","-ar","44100","-ac","1"]
-    
+            vf = ["-vf", f"scale={scale_w}:{scale_h}"]  # only used for grid/auto
+
+        audio = ["-an"] if role == "grid" else ["-c:a", "aac", "-ar", "44100", "-ac", "1"]
+
         cmd = [
-            "ffmpeg","-y","-nostdin","-hide_banner","-loglevel","warning",
-            "-rtsp_transport","tcp","-i", src, "-fflags","+genpts",
-            "-map","0:v", *vf, *enc, *audio,
-            "-f","hls","-hls_time",seg,"-hls_list_size","12","-hls_allow_cache","0",
-            "-hls_flags","delete_segments+independent_segments+append_list+temp_file",
-            "-hls_segment_filename", str(out_dir/"segment_%06d.ts"),
-            str(out_dir/"index.m3u8"),
+            "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "warning",
+            "-rtsp_transport", "tcp",
+            "-i", src,
+            "-fflags", "+genpts",
+            "-map", "0:v",
+            *vf, *enc, *audio,
+            *_hls_opts(seg, "12"),
+            "-hls_segment_filename", str(out_dir / "segment_%06d.ts"),
+            str(out_dir / "index.m3u8"),
         ]
         return _spawn(cmd, log)
-    
-    def _start_recording_proc(self, cam_name:str, src:str, crf:int) -> subprocess.Popen:
+
+    def _start_recording_proc(self, cam_name: str, src: str, crf: int) -> subprocess.Popen:
         self._ensure_rec_date_hour(cam_name)
         rec_base = REC_DIR / cam_name
         log = LIVE_DIR / cam_name / f"ffmpeg_recording.log"
         cmd = [
-            "ffmpeg","-y","-nostdin","-hide_banner","-loglevel","warning",
-            "-rtsp_transport","tcp","-i", src, "-fflags","+genpts",
-            "-map","0:v","-map","0:a?",
-            "-c:v","libx264","-preset","veryfast","-crf",str(max(18, min(28, crf))),
-            "-c:a","aac","-b:a","128k",
-            "-f","segment",
+            "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "warning",
+            "-rtsp_transport", "tcp",
+            "-i", src,
+            "-fflags", "+genpts",
+            "-map", "0:v", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", str(max(18, min(28, crf))),
+            "-c:a", "aac", "-b:a", "128k",
+            "-f", "segment",
             "-segment_time", str(settings.RECORDING_SEGMENT_SEC),
-            "-reset_timestamps","1",
-            "-strftime","1",
+            "-reset_timestamps", "1",
+            "-strftime", "1",
             str(rec_base / "%Y-%m-%d/%H/%Y-%m-%d_%H-%M-%S.mp4"),
         ]
         return _spawn(cmd, log)
-            
-    
-ffmpeg_manager = FFmpegManager()
 
+    def start_by_config(self, cam):
+        """
+        Start roles that should always be on based on current config:
+          - grid: always on (according to auto/manual selection & optional scaling)
+          - recording: only if retention > 0 and role not disabled
+        This method intentionally takes a 'resolver' callable (cam, role) -> (src, scale_w, scale_h, run)
+        so ffmpeg_manager stays model-agnostic.
+        """
+        # Grid
+        src, sw, sh, run = resolve_role(cam, "grid")
+        if run and src:
+            self.start_role(
+                cam_id=cam.id,
+                cam_name=cam.name,
+                role="grid",
+                src=src,
+                crf=cam.low_crf,
+                scale_w=sw, scale_h=sh,
+            )
+    
+        # Recording (honor retention inside resolver)
+        src, sw, sh, run = resolve_role(cam, "recording")
+        if run and src:
+            self.start_role(
+                cam_id=cam.id,
+                cam_name=cam.name,
+                role="recording",
+                src=src,
+                crf=cam.high_crf,
+                # no scaling for recording; sw/sh ignored
+            )
+        
+    # ---------- filesystem helpers ----------
+
+    def _ensure_rec_date_hour(self, cam_name: str):
+        now = time.localtime()
+        date_dir = REC_DIR / cam_name / time.strftime("%Y-%m-%d", now)
+        hour_dir = date_dir / time.strftime("%H", now)
+        hour_dir.mkdir(parents=True, exist_ok=True)
+
+    def _cleanup_live_role(self, cam_name: str, role: str):
+        try:
+            d = LIVE_DIR / cam_name / role
+            if d.exists():
+                shutil.rmtree(d)
+        except Exception:
+            pass
+
+    def _cleanup_live_all(self, cam_name: str):
+        try:
+            base = LIVE_DIR / cam_name
+            if base.exists():
+                shutil.rmtree(base)
+        except Exception:
+            pass
+
+    # ---------- idle reaper ----------
+
+    def _idle_reaper(self):
+        interval = getattr(settings, "IDLE_REAPER_INTERVAL_SEC", 10)
+        timeout = getattr(settings, "ROLE_IDLE_TIMEOUT_SEC", 120)
+        logger.info("Idle reaper started: interval=%ss timeout=%ss", interval, timeout)
+        while True:
+            time.sleep(interval)
+            try:
+                # snapshot keys to avoid holding lock during stops
+                with self._lock:
+                    cam_ids = list(self._procs.keys())
+                for cam_id in cam_ids:
+                    cam_name = None
+                    with self._lock:
+                        roles_map = dict(self._procs.get(cam_id, {}))
+                        cam_name = self._cam_names.get(cam_id)
+                    for role in ("medium", "high"):
+                        p = roles_map.get(role)
+                        if not _alive(p):
+                            # not running anyway; continue
+                            continue
+                        # if anyone is watching, keep it
+                        if self._leases.count(cam_id, role) > 0:
+                            continue
+                        # no leases: check idle duration
+                        idle_s = self._leases.idle_for(cam_id, role)
+                        if idle_s and idle_s > timeout:
+                            logger.info("Auto-stopping cam_id=%s role=%s after idle %ss", cam_id, role, int(idle_s))
+                            # prefer full stop with cleanup if we have cam_name
+                            if cam_name:
+                                self.stop_role(cam_id, cam_name, role)
+                            else:
+                                # fallback: just stop the proc
+                                self._stop_role_internal(cam_id, role)
+            except Exception:
+                logger.exception("Idle reaper error")
+
+    def _stop_role_internal(self, cam_id: int, role: str):
+        with self._lock:
+            p = (self._procs.get(cam_id) or {}).pop(role, None)
+        if p:
+            try:
+                if _alive(p):
+                    p.send_signal(signal.SIGTERM)
+                    p.wait(timeout=5)
+            except Exception:
+                try:
+                    if _alive(p): p.kill()
+                except Exception:
+                    pass
+        # (no cleanup here; used only when cam_name is unknown)
+
+ffmpeg_manager = FFmpegManager()
