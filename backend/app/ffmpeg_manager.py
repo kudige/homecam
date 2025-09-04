@@ -47,11 +47,16 @@ def _low_encoder_opts(low_crf: int, grid_w: int | None, grid_h: int | None):
         opts = ["-force_key_frames", f"expr:gte(t,n_forced*2)"] + opts
     return opts    
 
+def _alive(p: subprocess.Popen | None) -> bool:
+    return p is not None and p.poll() is None
+
 class FFmpegManager:
     # store per-cam map of role->proc
     def __init__(self):
         self._procs: dict[int, dict[str, subprocess.Popen]] = {}
-
+        self._lock = threading.Lock()
+        self._inflight: set[tuple[int,str]] = set()  # (cam_id, role) currently starting
+        
     def _ensure_dirs(self, cam_name: str) -> None:
         (LIVE_DIR / cam_name / "low").mkdir(parents=True, exist_ok=True)
         (LIVE_DIR / cam_name / "high").mkdir(parents=True, exist_ok=True)
@@ -80,38 +85,29 @@ class FFmpegManager:
             next_hour.mkdir(parents=True, exist_ok=True)
             time.sleep(20)
         
-    def stop_role(self, cam_id: int, role: str):
-        procs_by_role = self._procs.get(cam_id) or {}
-        p = procs_by_role.pop(role, None)
+    def stop_role(self, cam_id:int, role:str):
+        with self._lock:
+            p = (self._procs.get(cam_id) or {}).pop(role, None)
         if p:
             try:
-                if p.poll() is None:
-                    p.send_signal(signal.SIGTERM)
-                    p.wait(timeout=5)
+                if _alive(p):
+                    p.send_signal(signal.SIGTERM); p.wait(timeout=5)
             except Exception:
                 try:
-                    if p.poll() is None:
-                        p.kill()
-                except Exception:
-                    pass
-        # clean up empty maps
-        if cam_id in self._procs and not self._procs[cam_id]:
-            self._procs.pop(cam_id, None)
+                    if _alive(p): p.kill()
+                except Exception: pass
     
-    def stop_camera(self, cam_id: int):
-        """Backward-compatible: stop ALL roles for this camera."""
-        procs_by_role = self._procs.pop(cam_id, {}) or {}
-        for role, p in list(procs_by_role.items()):
+    def stop_camera(self, cam_id:int):
+        with self._lock:
+            procs_by_role = self._procs.pop(cam_id, {}) or {}
+        for role, p in procs_by_role.items():
             try:
-                if p and p.poll() is None:
-                    p.send_signal(signal.SIGTERM)
-                    p.wait(timeout=5)
+                if _alive(p):
+                    p.send_signal(signal.SIGTERM); p.wait(timeout=5)
             except Exception:
                 try:
-                    if p and p.poll() is None:
-                        p.kill()
-                except Exception:
-                    pass
+                    if _alive(p): p.kill()
+                except Exception: pass
     
     def stop_all(self):
         """Stop everything for all cameras."""
@@ -127,60 +123,57 @@ class FFmpegManager:
     def start_role(self, cam_id:int, cam_name:str, role:str, src:str,
                    crf:int, scale_w:int|None=None, scale_h:int|None=None):
         """
-        role in {"grid","medium","high"} → HLS; "recording" → segment mp4
-        scale_* only applied for HLS roles (grid only in our resolver).
+        Safe, idempotent. Only one ffmpeg per (cam_id, role).
+        If already running, it returns without spawning a new one.
         """
-        self.stop_role(cam_id, role)
-        (LIVE_DIR / cam_name / role).mkdir(parents=True, exist_ok=True)
-
+        key = (cam_id, role)
+        with self._lock:
+            # If a start is in-flight for this role, ignore concurrent calls
+            if key in self._inflight:
+                return {"ok": False, "reason": "start_in_progress"}
+            self._inflight.add(key)
+            try:
+                # If already running, do nothing
+                existing = (self._procs.get(cam_id) or {}).get(role)
+                if _alive(existing):
+                    return {"ok": True, "already_running": True}
+    
+                # Ensure role map exists
+                self._procs.setdefault(cam_id, {})
+    
+                # If an old proc exists but is dead, drop it
+                if existing and not _alive(existing):
+                    self._procs[cam_id].pop(role, None)
+    
+            finally:
+                # We'll remove inflight AFTER spawn below, so we release now and reacquire
+                pass
+    
+        # Build the command OUTSIDE the lock to keep critical section short
         if role == "recording":
-            # MP4 segments
-            rec_base = REC_DIR / cam_name
-            self._ensure_rec_date_hour(cam_name)
-            log = LIVE_DIR / cam_name / f"ffmpeg_{role}.log"
-            cmd = [
-                "ffmpeg","-y","-nostdin","-hide_banner","-loglevel","warning",
-                "-rtsp_transport","tcp","-i", src, "-fflags","+genpts",
-                "-map","0:v","-map","0:a?",
-                "-c:v","libx264","-preset","veryfast","-crf",str(max(18,min(28,crf))),
-                "-c:a","aac","-b:a","128k",
-                "-f","segment",
-                "-segment_time", str(settings.RECORDING_SEGMENT_SEC),
-                "-reset_timestamps","1",
-                "-strftime","1",
-                str(rec_base / "%Y-%m-%d/%H/%Y-%m-%d_%H-%M-%S.mp4"),
-            ]
-            p = _spawn(cmd, log)
+            p = self._start_recording_proc(cam_name, src, crf)
         else:
-            # HLS roles
-            out_dir = LIVE_DIR / cam_name / role
-            log = LIVE_DIR / cam_name / f"ffmpeg_{role}.log"
-            seg="2"
-            enc = [
-                "-c:v","libx264","-preset","veryfast","-crf",str(crf),
-                "-g","48","-sc_threshold","0",
-                "-force_key_frames", f"expr:gte(t,n_forced*{seg})",
-                "-maxrate","4000k" if role!="grid" else "1200k",
-                "-bufsize","4000k" if role!="grid" else "1200k",
-            ]
-            vf = []
-            if scale_w and scale_h:  # only grid auto will pass these
-                vf = ["-vf", f"scale={scale_w}:{scale_h}"]
-            # audio only for medium/high
-            audio = ["-an"] if role=="grid" else ["-c:a","aac","-ar","44100","-ac","1"]
-            cmd = [
-                "ffmpeg","-y","-nostdin","-hide_banner","-loglevel","warning",
-                "-rtsp_transport","tcp","-i", src, "-fflags","+genpts",
-                "-map","0:v", *vf, *enc, *audio,
-                "-f","hls","-hls_time",seg,"-hls_list_size","12","-hls_allow_cache","0",
-                "-hls_flags","delete_segments+independent_segments+append_list+temp_file",
-                "-hls_segment_filename", str(out_dir/"segment_%06d.ts"),
-                str(out_dir/"index.m3u8"),
-            ]
-            p = _spawn(cmd, log)
-
-        self._procs.setdefault(cam_id, {})[role] = p
-
+            p = self._start_hls_proc(cam_name, role, src, crf, scale_w, scale_h)
+    
+        with self._lock:
+            # Double-check nobody snuck in: if someone else set a proc and it's alive, kill ours
+            existing = (self._procs.get(cam_id) or {}).get(role)
+            if _alive(existing):
+                # We spawned redundantly; stop the extra
+                try:
+                    if _alive(p):
+                        p.send_signal(signal.SIGTERM); p.wait(timeout=5)
+                except Exception:
+                    try: p.kill()
+                    except Exception: pass
+                self._inflight.discard(key)
+                return {"ok": True, "already_running": True}
+    
+            # Record the proc
+            self._procs[cam_id][role] = p
+            self._inflight.discard(key)
+            return {"ok": True}
+    
     def start_by_config(self, cam: "Camera"):
         # grid: always on
         src, sw, sh, run = resolve_role(cam, "grid")
@@ -188,6 +181,54 @@ class FFmpegManager:
         # medium/high only on demand (endpoints below)
         # recording: governed by retention and mode; start/stop with retention changes
 
-
+    def _start_hls_proc(self, cam_name:str, role:str, src:str, crf:int,
+                        scale_w:int|None, scale_h:int|None) -> subprocess.Popen:
+        (LIVE_DIR / cam_name / role).mkdir(parents=True, exist_ok=True)
+        out_dir = LIVE_DIR / cam_name / role
+        log = LIVE_DIR / cam_name / f"ffmpeg_{role}.log"
+        seg = "2"
+    
+        enc = [
+            "-c:v","libx264","-preset","veryfast","-crf",str(crf),
+            "-g","48","-sc_threshold","0",
+            "-force_key_frames", f"expr:gte(t,n_forced*{seg})",
+            "-maxrate","4000k" if role!="grid" else "1200k",
+            "-bufsize","4000k" if role!="grid" else "1200k",
+        ]
+        vf = []
+        if scale_w and scale_h:
+            vf = ["-vf", f"scale={scale_w}:{scale_h}"]
+        audio = ["-an"] if role=="grid" else ["-c:a","aac","-ar","44100","-ac","1"]
+    
+        cmd = [
+            "ffmpeg","-y","-nostdin","-hide_banner","-loglevel","warning",
+            "-rtsp_transport","tcp","-i", src, "-fflags","+genpts",
+            "-map","0:v", *vf, *enc, *audio,
+            "-f","hls","-hls_time",seg,"-hls_list_size","12","-hls_allow_cache","0",
+            "-hls_flags","delete_segments+independent_segments+append_list+temp_file",
+            "-hls_segment_filename", str(out_dir/"segment_%06d.ts"),
+            str(out_dir/"index.m3u8"),
+        ]
+        return _spawn(cmd, log)
+    
+    def _start_recording_proc(self, cam_name:str, src:str, crf:int) -> subprocess.Popen:
+        self._ensure_rec_date_hour(cam_name)
+        rec_base = REC_DIR / cam_name
+        log = LIVE_DIR / cam_name / f"ffmpeg_recording.log"
+        cmd = [
+            "ffmpeg","-y","-nostdin","-hide_banner","-loglevel","warning",
+            "-rtsp_transport","tcp","-i", src, "-fflags","+genpts",
+            "-map","0:v","-map","0:a?",
+            "-c:v","libx264","-preset","veryfast","-crf",str(max(18, min(28, crf))),
+            "-c:a","aac","-b:a","128k",
+            "-f","segment",
+            "-segment_time", str(settings.RECORDING_SEGMENT_SEC),
+            "-reset_timestamps","1",
+            "-strftime","1",
+            str(rec_base / "%Y-%m-%d/%H/%Y-%m-%d_%H-%M-%S.mp4"),
+        ]
+        return _spawn(cmd, log)
+            
+    
 ffmpeg_manager = FFmpegManager()
 

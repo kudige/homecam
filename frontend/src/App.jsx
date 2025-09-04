@@ -111,7 +111,9 @@ function CameraAdminRow({ cam, expanded, onToggle, onRefresh }){
 
   const [gridW, setGridW] = useState(cam.grid_target_w ?? 640)
   const [gridH, setGridH] = useState(cam.grid_target_h ?? 360)
-
+  
+  const [pending, setPending] = useState({ medium:false, high:false })
+  
   // Role running flags for Medium/High (polled)
   const [running, setRunning] = useState({ medium:false, high:false })
   useEffect(() => {
@@ -220,17 +222,23 @@ function CameraAdminRow({ cam, expanded, onToggle, onRefresh }){
               allowDisabled={true}
             >
 			  {running.medium
-			   ? <button className="btn secondary" onClick={async ()=>{
+			   ? <button className="btn secondary" disabled={pending.medium}
+						 onClick={async ()=>{
+						   setPending(p=>({...p, medium:true}))
 						   await API.stopMedium(cam.id)
 						   const st = await API.getCameraStatusAdmin(cam.id)
 						   setRunning(r => ({...r, medium: !!(st?.roles?.medium)}))
+						   setPending(p=>({...p, medium:false}))
 						 }}>
 				   Stop
 				 </button>
-			   : <button className="btn" onClick={async ()=>{
+			   : <button className="btn" disabled={pending.medium}
+						 onClick={async ()=>{
+						   setPending(p=>({...p, medium:true}))
 						   await API.startMedium(cam.id)
 						   const st = await API.getCameraStatusAdmin(cam.id)
 						   setRunning(r => ({...r, medium: !!(st?.roles?.medium)}))
+						   setPending(p=>({...p, medium:false}))
 						 }}>
 				   Start
 				 </button>}
@@ -244,17 +252,23 @@ function CameraAdminRow({ cam, expanded, onToggle, onRefresh }){
               allowDisabled={true}
             >
 			  {running.high
-			   ? <button className="btn secondary" onClick={async ()=>{
+			   ? <button className="btn secondary" disabled={pending.high}
+						 onClick={async ()=>{
+						   setPending(p=>({...p, high:true}))
 						   await API.stopHigh(cam.id)
 						   const st = await API.getCameraStatusAdmin(cam.id)
 						   setRunning(r => ({...r, high: !!(st?.roles?.high)}))
+						   setPending(p=>({...p, high:false}))
 						 }}>
 				   Stop
 				 </button>
-			   : <button className="btn" onClick={async ()=>{
+			   : <button className="btn" disabled={pending.high}
+						 onClick={async ()=>{
+						   setPending(p=>({...p, high:true}))
 						   await API.startHigh(cam.id)
 						   const st = await API.getCameraStatusAdmin(cam.id)
 						   setRunning(r => ({...r, high: !!(st?.roles?.high)}))
+						   setPending(p=>({...p, high:false}))
 						 }}>
 				   Start
 				 </button>}
