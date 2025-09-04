@@ -108,6 +108,7 @@ function CameraAdminRow({ cam, expanded, onToggle, onRefresh }){
   const [mediumSel, setMediumSel] = useState(selFrom(cam.medium_mode, cam.medium_stream_id, true))
   const [highSel,   setHighSel]   = useState(selFrom(cam.high_mode, cam.high_stream_id, true))
   const [recSel,    setRecSel]    = useState(selFrom(cam.recording_mode, cam.recording_stream_id, true))
+  const [retention, setRetention] = useState(Number.isFinite(cam.retention_days) ? cam.retention_days : 0);
 
   const [gridW, setGridW] = useState(cam.grid_target_w ?? 640)
   const [gridH, setGridH] = useState(cam.grid_target_h ?? 360)
@@ -143,6 +144,7 @@ function CameraAdminRow({ cam, expanded, onToggle, onRefresh }){
     setMediumSel(selFrom(cam.medium_mode, cam.medium_stream_id, true))
     setHighSel(selFrom(cam.high_mode, cam.high_stream_id, true))
     setRecSel(selFrom(cam.recording_mode, cam.recording_stream_id, true))
+	setRetention(Number.isFinite(cam.retention_days) ? cam.retention_days : 0);
     setGridW(cam.grid_target_w ?? 640)
     setGridH(cam.grid_target_h ?? 360)
   }, [cam])
@@ -154,6 +156,19 @@ function CameraAdminRow({ cam, expanded, onToggle, onRefresh }){
     ;(async () => { try { setStreams(await API.listStreamsAdmin(cam.id)) } catch {} })()
   }, [expanded, cam.id]) // eslint-disable-line
 
+  async function onChangeRecording(val){
+	setRecSel(val)
+	// If user enables recording for the first time, default retention to 1
+	if (val !== 'disabled' && (!retention || retention <= 0)) {
+      setRetention(1)
+	}
+	// If choosing a manual stream, ensure it’s probed so label shows WxH
+	if (val.startsWith('stream:')){
+      const id = val.split(':')[1]
+      await ensureProbed(cam.id, streams, id, setStreams)
+	}
+  }
+  
   // unified dropdown change handlers
   async function onChangeGrid(val){
     setGridSel(val)
@@ -179,6 +194,8 @@ function CameraAdminRow({ cam, expanded, onToggle, onRefresh }){
       ...bodyFor('medium', mediumSel),
       ...bodyFor('high',   highSel),
       ...bodyFor('recording', recSel),
+	  // retention: 0 if disabled, otherwise the value
+      retention_days: (recSel === 'disabled') ? 0 : Math.max(1, Number(retention) || 1),
     }
     await API.updateRolesAdmin(cam.id, body)
     await onRefresh()
@@ -300,15 +317,27 @@ function CameraAdminRow({ cam, expanded, onToggle, onRefresh }){
 				 </button>}
             </RoleLine>
 
-            <RoleLine
-              title="Recording (via retention)"
-              value={recSel}
-              onChange={(v)=>onChangeRole(setRecSel, v)}
-              streams={streams}
-              allowDisabled={true}
-            >
-              <span className="pill">Toggle via retention</span>
-            </RoleLine>
+			<RoleLine
+			  title="Recording"
+			  value={recSel}
+			  onChange={onChangeRecording}
+			  streams={streams}
+			  allowDisabled={true}
+			>
+			  {/* Retention input shows only when not disabled */}
+			  {recSel !== 'disabled' && (
+				<div className="row" style={{gap:8, alignItems:'center'}}>
+				  <div style={{fontSize:12, opacity:.8}}>Retention (days)</div>
+				  <input
+					type="number"
+					min="1"
+					value={retention}
+					onChange={e => setRetention(e.target.value)}
+					style={{width:96}}
+				  />
+				</div>
+			  )}
+			</RoleLine>
           </div>
 
           <div className="row" style={{gap:8, marginTop:12}}>

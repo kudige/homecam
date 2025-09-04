@@ -102,51 +102,37 @@ def autostart():
     finally: s.close()
 
 @app.put("/api/admin/cameras/{cam_id}/roles", response_model=CameraAdminOut)
-def admin_update_roles(cam_id:int, body:CameraRoleUpdate, session:Session=Depends(get_session)):
+def admin_update_roles(cam_id: int, body: CameraRoleUpdate, session: Session = Depends(get_session)):
     cam = session.get(Camera, cam_id)
-    if not cam: raise HTTPException(404,"Not found")
-    old_ret = cam.retention_days or 0
-    # apply fields
-    for f,v in body.dict(exclude_unset=True).items(): setattr(cam,f,v)
-    session.commit(); session.refresh(cam)
+    if not cam:
+        raise HTTPException(404, "Not found")
 
-    # After loading cam and applying body fields…
-    # If a manual stream was selected, ensure it's probed so UI & logic see WxH
-    man_low_id  = body.grid_stream_id if (body.grid_mode == RoleMode.manual) else None
-    man_med_id  = body.medium_stream_id if (body.medium_mode == RoleMode.manual) else None
-    man_high_id = body.high_stream_id if (body.high_mode == RoleMode.manual) else None
-    man_rec_id  = body.recording_stream_id if (body.recording_mode == RoleMode.manual) else None
-    
-    def _probe_id(stream_id):
-        if not stream_id: return
-        s = session.get(CameraStream, int(stream_id))
-        if s and s.camera_id == cam.id:
-            try:
-                ensure_stream_probed(session, s)
-            except Exception as e:
-                print(f"[probe] failed for stream {s.id}: {e}")
-    
-    _probe_id(man_low_id); _probe_id(man_med_id); _probe_id(man_high_id); _probe_id(man_rec_id)
-    
-    # If GRID is manual and a stream chosen, snap grid_target_* to that stream's native WxH
-    if body.grid_mode == RoleMode.manual and body.grid_stream_id:
-        s = session.get(CameraStream, int(body.grid_stream_id))
-        if s and s.width and s.height:
-            cam.grid_target_w = s.width
-            cam.grid_target_h = s.height
-            session.commit(); session.refresh(cam)
-    
-    # Now (re)start grid/recording from _resolve_role(cam, ...)
-    ffmpeg_manager.start_by_config(cam, resolve_role)  # will (re)start grid appropriately
+    # 1) Apply incoming role fields (+ retention_days)
+    payload = body.dict(exclude_unset=True)
 
-    # adjust recording if retention>0
-    if cam.retention_days>0:
-        src, sw, sh, run = resolve_role(cam,"recording")
-        if run and src: ffmpeg_manager.start_role(cam.id, cam.name, "recording", src, cam.high_crf)
-    else:
-        ffmpeg_manager.stop_role(cam.id,"recording")
+    # If recording is disabled, force retention to 0
+    if payload.get("recording_mode") == RoleMode.disabled:
+        payload["retention_days"] = 0
 
-    return cam
+    # If retention_days provided but negative/null, clamp to 0..365 (or any sane max)
+    if "retention_days" in payload:
+        rd = payload["retention_days"]
+        payload["retention_days"] = max(0, int(rd)) if rd is not None else 0
+
+    for f, v in payload.items():
+        setattr(cam, f, v)
+    session.commit()
+    session.refresh(cam)
+
+    # 2) (Re)apply always-on roles (grid and recording-if-enabled)
+    ffmpeg_manager.start_by_config(cam)
+
+    # 3) If recording should not run, stop it explicitly (covers mode=disabled or retention=0)
+    _, _, _, rec_run = resolve_role(cam, "recording")
+    if not rec_run:
+        ffmpeg_manager.stop_role(cam.id, cam.name, "recording")
+
+    return cam    
 
 # Medium/high on-demand controls
 @app.post("/api/admin/cameras/{cam_id}/medium/start")
