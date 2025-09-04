@@ -67,6 +67,12 @@ const API = {
   stopMedium(camId)  { return fetch(`/api/admin/cameras/${camId}/medium/stop`,  { method: 'POST' }).then(r => r.json()); },
   startHigh(camId)   { return fetch(`/api/admin/cameras/${camId}/high/start`,   { method: 'POST' }).then(r => r.json()); },
   stopHigh(camId)    { return fetch(`/api/admin/cameras/${camId}/high/stop`,    { method: 'POST' }).then(r => r.json()); },
+  stopAllCameraAdmin(id) {
+	return fetch(`/api/admin/cameras/${id}/stop`, { method: 'POST' }).then(r => r.json());
+  },
+  startGrid(camId) {
+	return fetch(`/api/admin/cameras/${camId}/grid/start`, { method: 'POST' }).then(r => r.json());
+  },
 };
 
 export default API;

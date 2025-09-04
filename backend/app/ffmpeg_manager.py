@@ -15,6 +15,12 @@ if not logger.handlers:
     logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
                         format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
 
+# -------- cleanup HLS files when streams are stopped ------- 
+import shutil
+
+def _alive(p: subprocess.Popen | None) -> bool:
+    return p is not None and p.poll() is None
+    
 def _spawn(cmd: list[str], log_path: Path) -> subprocess.Popen:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     logf = open(log_path, "ab", buffering=0)
@@ -46,9 +52,6 @@ def _low_encoder_opts(low_crf: int, grid_w: int | None, grid_h: int | None):
     else:
         opts = ["-force_key_frames", f"expr:gte(t,n_forced*2)"] + opts
     return opts    
-
-def _alive(p: subprocess.Popen | None) -> bool:
-    return p is not None and p.poll() is None
 
 class FFmpegManager:
     # store per-cam map of role->proc
@@ -85,30 +88,55 @@ class FFmpegManager:
             next_hour.mkdir(parents=True, exist_ok=True)
             time.sleep(20)
         
-    def stop_role(self, cam_id:int, role:str):
+    def _cleanup_live_role(self, cam_name: str, role: str):
+        d = LIVE_DIR / cam_name / role
+        try:
+            if d.exists():
+                shutil.rmtree(d)
+        except Exception:
+            pass
+    
+    def _cleanup_live_all(self, cam_name: str):
+        base = LIVE_DIR / cam_name
+        try:
+            if base.exists():
+                shutil.rmtree(base)
+        except Exception:
+            pass
+
+    def stop_role(self, cam_id: int, cam_name: str, role: str):
         with self._lock:
             p = (self._procs.get(cam_id) or {}).pop(role, None)
         if p:
             try:
                 if _alive(p):
-                    p.send_signal(signal.SIGTERM); p.wait(timeout=5)
+                    p.send_signal(signal.SIGTERM)
+                    p.wait(timeout=5)
             except Exception:
                 try:
-                    if _alive(p): p.kill()
-                except Exception: pass
-    
-    def stop_camera(self, cam_id:int):
+                    if _alive(p):
+                        p.kill()
+                except Exception:
+                    pass
+        # Always cleanup the HLS folder for this role
+        self._cleanup_live_role(cam_name, role)
+            
+    def stop_camera(self, cam_id: int, cam_name: str):
         with self._lock:
             procs_by_role = self._procs.pop(cam_id, {}) or {}
         for role, p in procs_by_role.items():
             try:
                 if _alive(p):
-                    p.send_signal(signal.SIGTERM); p.wait(timeout=5)
+                    p.send_signal(signal.SIGTERM)
+                    p.wait(timeout=5)
             except Exception:
                 try:
-                    if _alive(p): p.kill()
-                except Exception: pass
-    
+                    if _alive(p):
+                        p.kill()
+                except Exception:
+                    pass
+        self._cleanup_live_all(cam_name)
+        
     def stop_all(self):
         """Stop everything for all cameras."""
         for cam_id in list(self._procs.keys()):
@@ -127,50 +155,54 @@ class FFmpegManager:
         If already running, it returns without spawning a new one.
         """
         key = (cam_id, role)
+    
+        # First critical section
         with self._lock:
-            # If a start is in-flight for this role, ignore concurrent calls
             if key in self._inflight:
                 return {"ok": False, "reason": "start_in_progress"}
+    
             self._inflight.add(key)
-            try:
-                # If already running, do nothing
-                existing = (self._procs.get(cam_id) or {}).get(role)
-                if _alive(existing):
-                    return {"ok": True, "already_running": True}
+            self._procs.setdefault(cam_id, {})
     
-                # Ensure role map exists
-                self._procs.setdefault(cam_id, {})
+            existing = self._procs[cam_id].get(role)
+            if existing is not None and existing.poll() is None:
+                # Already running — clear inflight before returning
+                self._inflight.discard(key)
+                return {"ok": True, "already_running": True}
+            # Drop dead proc entry if present
+            if existing is not None and existing.poll() is not None:
+                self._procs[cam_id].pop(role, None)
     
-                # If an old proc exists but is dead, drop it
-                if existing and not _alive(existing):
-                    self._procs[cam_id].pop(role, None)
+        # Build & spawn OUTSIDE the lock
+        try:
+            if role == "recording":
+                new_proc = self._start_recording_proc(cam_name, src, crf)
+            else:
+                new_proc = self._start_hls_proc(cam_name, role, src, crf, scale_w, scale_h)
+        except Exception as e:
+            with self._lock:
+                self._inflight.discard(key)
+            raise
     
-            finally:
-                # We'll remove inflight AFTER spawn below, so we release now and reacquire
-                pass
-    
-        # Build the command OUTSIDE the lock to keep critical section short
-        if role == "recording":
-            p = self._start_recording_proc(cam_name, src, crf)
-        else:
-            p = self._start_hls_proc(cam_name, role, src, crf, scale_w, scale_h)
-    
+        # Second critical section: commit proc (double-check)
         with self._lock:
-            # Double-check nobody snuck in: if someone else set a proc and it's alive, kill ours
-            existing = (self._procs.get(cam_id) or {}).get(role)
-            if _alive(existing):
-                # We spawned redundantly; stop the extra
+            existing_now = self._procs.get(cam_id, {}).get(role)
+            if existing_now is not None and existing_now.poll() is None:
+                # Someone else won the race; kill ours
                 try:
-                    if _alive(p):
-                        p.send_signal(signal.SIGTERM); p.wait(timeout=5)
+                    if new_proc.poll() is None:
+                        new_proc.send_signal(signal.SIGTERM)
+                        new_proc.wait(timeout=5)
                 except Exception:
-                    try: p.kill()
-                    except Exception: pass
+                    try:
+                        if new_proc.poll() is None:
+                            new_proc.kill()
+                    except Exception:
+                        pass
                 self._inflight.discard(key)
                 return {"ok": True, "already_running": True}
     
-            # Record the proc
-            self._procs[cam_id][role] = p
+            self._procs[cam_id][role] = new_proc
             self._inflight.discard(key)
             return {"ok": True}
     

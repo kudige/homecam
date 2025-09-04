@@ -162,8 +162,10 @@ def start_medium(cam_id:int, session:Session=Depends(get_session)):
     return {"ok": True}
 
 @app.post("/api/admin/cameras/{cam_id}/medium/stop")
-def stop_medium(cam_id:int):
-    ffmpeg_manager.stop_role(cam_id,"medium"); return {"ok":True}
+def stop_medium(cam_id: int, session: Session = Depends(get_session)):
+    cam = session.get(Camera, cam_id); assert cam
+    ffmpeg_manager.stop_role(cam.id, cam.name, "medium")
+    return {"ok": True}
 
 @app.post("/api/admin/cameras/{cam_id}/high/start")
 def start_high(cam_id:int, session:Session=Depends(get_session)):
@@ -174,8 +176,10 @@ def start_high(cam_id:int, session:Session=Depends(get_session)):
     return {"ok": True}
 
 @app.post("/api/admin/cameras/{cam_id}/high/stop")
-def stop_high(cam_id:int):
-    ffmpeg_manager.stop_role(cam_id,"high"); return {"ok":True}
+def stop_high(cam_id: int, session: Session = Depends(get_session)):
+    cam = session.get(Camera, cam_id); assert cam
+    ffmpeg_manager.stop_role(cam.id, cam.name, "high")
+    return {"ok": True}
 
 # ----------------------------- Admin API (with RTSP) ------------------------------
 
@@ -254,7 +258,7 @@ def admin_delete_camera(cam_id: int, session: Session = Depends(get_session)):
     cam = session.get(Camera, cam_id)
     if not cam:
         return {"ok": True}
-    ffmpeg_manager.stop_camera(cam_id)
+    ffmpeg_manager.stop_camera(cam_id, cam.name)
     session.delete(cam)
     session.commit()
     return {"ok": True}
@@ -296,9 +300,28 @@ def admin_start_camera(cam_id: int, session: Session = Depends(get_session)):
 
 
 @app.post("/api/admin/cameras/{cam_id}/stop")
-def admin_stop_camera(cam_id: int):
-    ffmpeg_manager.stop_camera(cam_id)
+def admin_stop_camera(cam_id: int, session: Session = Depends(get_session)):
+    cam = session.get(Camera, cam_id)
+    if not cam:
+        raise HTTPException(404, "Not found")
+    ffmpeg_manager.stop_camera(cam.id, cam.name)
     return {"ok": True}
+
+@app.post("/api/admin/cameras/{cam_id}/grid/start")
+def start_grid(cam_id: int, session: Session = Depends(get_session)):
+    cam = session.get(Camera, cam_id)
+    if not cam:
+        raise HTTPException(404, "Not found")
+
+    # Resolve the grid role (uses auto/manual + grid_target_*)
+    # If you moved the resolver to roles.py, import resolve_role and use it here.
+    src, sw, sh, run = resolve_role(cam, "grid")  # returns (rtsp_url, scale_w, scale_h, should_run)
+    if not run or not src:
+        return {"ok": False, "reason": "grid_disabled_or_unavailable"}
+
+    # Grid always uses low_crf; scaling only if sw/sh provided (auto mode)
+    res = ffmpeg_manager.start_role(cam.id, cam.name, "grid", src, cam.low_crf, sw, sh)
+    return {"ok": True, **(res if isinstance(res, dict) else {})}
 
 
 # ----------------------------- Client API (no RTSP) -------------------------------

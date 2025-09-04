@@ -115,7 +115,7 @@ function CameraAdminRow({ cam, expanded, onToggle, onRefresh }){
   const [pending, setPending] = useState({ medium:false, high:false })
   
   // Role running flags for Medium/High (polled)
-  const [running, setRunning] = useState({ medium:false, high:false })
+  const [running, setRunning] = useState({ grid:false, medium:false, high:false })
   useEffect(() => {
 	if (!expanded) return
 	const poll = async () => {
@@ -123,6 +123,7 @@ function CameraAdminRow({ cam, expanded, onToggle, onRefresh }){
 		const st = await API.getCameraStatusAdmin(cam.id)
 		const roles = st?.roles || {}
 		setRunning({
+		  grid:   !!roles.grid,
           medium: !!roles.medium,
           high:   !!roles.high,
 		})
@@ -194,6 +195,18 @@ function CameraAdminRow({ cam, expanded, onToggle, onRefresh }){
         <div className="row" style={{gap:8}}>
           <button className="btn secondary" onClick={()=>API.deleteCameraAdmin(cam.id).then(onRefresh)}>Delete</button>
         </div>
+		<div className="row" style={{gap:8}}>
+		  <button className="btn secondary" onClick={async ()=>{
+					await API.stopAllCameraAdmin(cam.id)
+					// clear local running flags; grid will be off too
+					setRunning({ medium:false, high:false })
+					await onRefresh()
+				  }}>
+			Stop All
+		  </button>
+		  <button className="btn secondary" onClick={()=>API.deleteCameraAdmin(cam.id).then(onRefresh)}>Delete</button>
+		</div>
+		
       </div>
 
       {expanded && (
@@ -211,6 +224,19 @@ function CameraAdminRow({ cam, expanded, onToggle, onRefresh }){
                 <input type="number" style={{width:96}} value={gridW} onChange={e=>setGridW(e.target.value)} />
                 <input type="number" style={{width:96}} value={gridH} onChange={e=>setGridH(e.target.value)} />
                 <span className="pill">Target WxH</span>
+				{!running.grid && (
+				  <button
+					className="btn"
+					onClick={async ()=>{
+					  await API.startGrid(cam.id)
+					  const st = await API.getCameraStatusAdmin(cam.id)
+					  const roles = st?.roles || {}
+					  setRunning(r => ({ ...r, grid: !!roles.grid }))
+					}}
+				  >
+					Start Grid
+				  </button>
+				)}
               </div>
             </RoleLine>
 
