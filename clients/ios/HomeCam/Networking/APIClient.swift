@@ -6,7 +6,7 @@ final class APIClient {
     private init() {}
 
     func fetchCameras(serverBase: URL) async throws -> [Camera] {
-        // Expecting: GET {serverBase}/api/cameras -> { "cameras": [ {id,name,low_url,high_url}, ... ] }
+        // Expecting: GET {serverBase}/api/cameras -> { "cameras": [ {id,name,urls:{role:url,...}}, ... ] }
         let url = serverBase.appendingPathComponent("api/cameras")
         var req = URLRequest(url: url)
         req.timeoutInterval = 15

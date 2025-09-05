@@ -317,8 +317,11 @@ def client_list_cameras(request: Request, session: Session = Depends(get_session
         {
           "id": "1",
           "name": "Front Door",
-          "low_url":  "http://<server>/media/live/<camera>/low/index.m3u8",
-          "high_url": "http://<server>/media/live/<camera>/high/index.m3u8"
+          "urls": {
+            "grid":   "http://<server>/media/live/<camera>/grid/index.m3u8",
+            "medium": "http://<server>/media/live/<camera>/medium/index.m3u8",
+            "high":   "http://<server>/media/live/<camera>/high/index.m3u8"
+          }
         },
         ...
       ]
@@ -328,14 +331,14 @@ def client_list_cameras(request: Request, session: Session = Depends(get_session
     base = str(request.base_url).rstrip("/")  # e.g. http://localhost:8091
     items: list[CameraClientItem] = []
     for cam in cams:
-        # Build absolute URLs to the existing HLS outputs
-        low  = f"/media/live/{cam.name}/low/index.m3u8"
-        high = f"/media/live/{cam.name}/high/index.m3u8"
+        urls = {
+            role: f"{base}/media/live/{cam.name}/{role}/index.m3u8"
+            for role in ("grid", "medium", "high")
+        }
         items.append(CameraClientItem(
             id=str(cam.id),
             name=cam.name,
-            low_url=low,
-            high_url=high,
+            urls=urls,
         ))
     return CameraClientList(cameras=items)
 

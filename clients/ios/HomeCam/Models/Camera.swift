@@ -3,13 +3,10 @@ import Foundation
 struct Camera: Identifiable, Decodable, Hashable {
     let id: String
     let name: String
-    let lowURL: URL
-    let highURL: URL
+    let urls: [String: URL]
 
-    enum CodingKeys: String, CodingKey {
-        case id, name
-        case lowURL = "low_url"
-        case highURL = "high_url"
+    func url(for role: String) -> URL? {
+        return urls[role]
     }
 }
 
