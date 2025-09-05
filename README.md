@@ -24,8 +24,8 @@ cd deploy
 docker compose up --build -d
 
 # Open
-open http://localhost:8080
-````
+open http://localhost:8090
+```
 
 ### Add a camera
 
@@ -36,7 +36,7 @@ open http://localhost:8080
 ### Where files live
 
 * Live HLS: `media/live/<camera>/(low|high)/index.m3u8`
-* Recordings: `media/recordings/<camera>/YYYY-MM-DD/HH/HH-MM-SS.mp4`
+* Recordings: `media/recordings/<camera>/YYYY-MM-DD/HH/HH-MM-SS.mp4` (or `$RECORDINGS_ROOT/<camera>/...` if `RECORDINGS_ROOT` is set)
 
 ### Retention
 
@@ -54,7 +54,7 @@ pip install -r requirements.txt
 export MEDIA_ROOT=$(pwd)/../media
 export DB_PATH=$(pwd)/../data/homecam.db
 mkdir -p "$MEDIA_ROOT" ../data
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 8091
 ```
 
 Frontend:
@@ -63,7 +63,7 @@ Frontend:
 cd frontend
 npm i
 npm run dev
-# visit http://localhost:5173 (proxied to backend via vite.config.js)
+# visit http://localhost:8090 (proxied to backend via vite.config.js)
 ```
 
 ## Notes & Future Work
@@ -72,5 +72,3 @@ npm run dev
 * Recorded HLS playlists per time range can be generated instead of MP4 chunks for seamless scrub.
 * Auth: protect `/api/*` and `/media/*` via Nginx auth or JWT.
 * Health checks & restart policy for FFmpeg can be made more robust (exponential backoff, logs).
-
-```
