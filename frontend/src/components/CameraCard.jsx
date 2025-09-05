@@ -7,19 +7,17 @@ export default function CameraCard({ cam }) {
   const videoRef = useRef(null)
   const hlsRef = useRef(null)
   const stallTimerRef = useRef(null)
-  const [status, setStatus] = useState('idle')
+  const [status, setStatus] = useState('idle') // idle | starting | playing | error
   const [overlay, setOverlay] = useState({ open:false, title:'', src:'' })
 
-  // --- helpers ---
+  // --- tiny helpers ---
   async function headOk(url){ try { const r=await fetch(url,{method:'HEAD',cache:'no-store'}); return r.ok } catch { return false } }
   async function waitFor(url, ms=15000, step=400){
     const t0=Date.now(); while(Date.now()-t0<ms){ if(await headOk(url)) return true; await new Promise(r=>setTimeout(r,step)) } return false
   }
-
   async function openRole(role, startPath){
     const name = encodeURIComponent(cam.name)
     const url = `/media/live/${name}/${role}/index.m3u8`
-    // start role via admin endpoint if provided
     if (startPath){
       const res = await fetch(startPath, { method:'POST' })
       const j = await res.json().catch(()=>({}))
@@ -30,7 +28,7 @@ export default function CameraCard({ cam }) {
     setOverlay({ open:true, title: `${cam.name} — ${role.toUpperCase()}`, src:url })
   }
 
-  // --- grid thumbnail player (unchanged) ---
+  // --- grid thumbnail player (compact, no controls) ---
   function nudgePlayback() {
     const v = videoRef.current
     if (!v) return
@@ -59,7 +57,13 @@ export default function CameraCard({ cam }) {
       const src = `/media/live/${encodeURIComponent(cam.name)}/grid/index.m3u8`
       if (Hls.isSupported()){
         if (hlsRef.current){ try{ hlsRef.current.destroy() }catch{}; hlsRef.current=null }
-        const hls = new Hls({ lowLatencyMode:false, liveSyncDurationCount:4, liveMaxLatencyDurationCount:10, maxBufferLength:14, backBufferLength:30 })
+        const hls = new Hls({
+          lowLatencyMode:false,
+          liveSyncDurationCount:4,
+          liveMaxLatencyDurationCount:10,
+          maxBufferLength:14,
+          backBufferLength:30
+        })
         hlsRef.current = hls
         hls.loadSource(src); hls.attachMedia(videoRef.current)
         hls.on(Hls.Events.MANIFEST_PARSED, () => { setStatus('playing'); videoRef.current.play().catch(()=>{}); startWatchdog() })
@@ -75,33 +79,43 @@ export default function CameraCard({ cam }) {
     return () => { stopWatchdog(); if (hlsRef.current){ try{ hlsRef.current.destroy() }catch{}; hlsRef.current=null } }
   }, [cam.name])
 
+  // --- icon bar handlers ---
+  const openMedium = () => openRole('medium', `/api/admin/cameras/${cam.id}/medium/start`)
+  const openHigh   = () => openRole('high',   `/api/admin/cameras/${cam.id}/high/start`)
+
   return (
-    <div className="card">
-      <h3>{cam.name}</h3>
-      <video
-        ref={videoRef}
-        muted autoPlay playsInline preload="auto" controls
-        style={{ width: '100%', height: 180, background: '#000' }}
-      />
-      <div className="row" style={{padding:12, justifyContent:'space-between'}}>
-        <span className="pill">id {cam.id}</span>
-        <div className="row" style={{gap:8}}>
-          <button className="btn secondary" onClick={playGrid}>
-            {status === 'starting' ? 'Starting…' : 'Restart Grid'}
+    <div className="card" style={{borderRadius:12}}>
+      {/* compact header with two tiny icons */}
+      <div style={headerRow}>
+        <div style={title}>{cam.name}</div>
+        <div style={iconRow}>
+          <button title="Open Medium" aria-label="Open Medium" style={iconBtn} onClick={openMedium}>
+            {/* medium icon (play triangle) */}
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" role="img">
+              <path d="M8 5v14l11-7-11-7z" stroke="currentColor" strokeWidth="1.6" fill="currentColor" />
+            </svg>
           </button>
-          <button className="btn"
-            onClick={()=>openRole('medium', `/api/admin/cameras/${cam.id}/medium/start`)}
-          >
-            Open Medium
-          </button>
-          <button className="btn"
-            onClick={()=>openRole('high', `/api/admin/cameras/${cam.id}/high/start`)}
-          >
-            Open High
+          <button title="Open High" aria-label="Open High" style={iconBtn} onClick={openHigh}>
+            {/* high icon (magnifier) */}
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" role="img">
+              <circle cx="11" cy="11" r="6.5" stroke="currentColor" strokeWidth="1.6"/>
+              <path d="M16.5 16.5L21 21" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
+            </svg>
           </button>
         </div>
       </div>
 
+      <video
+        ref={videoRef}
+        muted
+        autoPlay
+        playsInline
+        preload="auto"
+        // no controls to keep compact
+        style={{ width:'100%', height:160, background:'#000', display:'block' }}
+      />
+
+      {/* Overlay player for medium/high */}
       <OverlayPlayer
         open={overlay.open}
         title={overlay.title}
@@ -112,27 +126,19 @@ export default function CameraCard({ cam }) {
   )
 }
 
-function RolePills({ roles }) {
-  const Item = ({ label, on }) => (
-    <span
-      className="pill"
-      style={{
-        marginLeft: 6,
-        background: on ? 'rgba(34,197,94,0.2)' : 'rgba(148,163,184,0.2)',
-        border: `1px solid ${on ? 'rgba(34,197,94,0.5)' : 'rgba(148,163,184,0.35)'}`,
-        color: on ? '#34d399' : '#cbd5e1'
-      }}
-      title={on ? 'running' : 'stopped'}
-    >
-      {label}
-    </span>
-  )
-  return (
-    <div className="row" style={{gap:0}}>
-      <Item label="GRID" on={roles.grid} />
-      <Item label="MED"  on={roles.medium} />
-      <Item label="HIGH" on={roles.high} />
-      <Item label="REC"  on={roles.rec} />
-    </div>
-  )
+const headerRow = {
+  display:'flex',
+  alignItems:'center',
+  justifyContent:'space-between',
+  padding:'6px 8px',
+  borderBottom:'1px solid #1f2630'
+}
+const title = { fontSize:13, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', maxWidth:'70%' }
+const iconRow = { display:'flex', gap:6 }
+const iconBtn = {
+  width:28, height:28,
+  display:'grid', placeItems:'center',
+  borderRadius:8, border:'1px solid #1f2630',
+  background:'#151a21', color:'#cad5e2',
+  cursor:'pointer'
 }
