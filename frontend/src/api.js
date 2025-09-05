@@ -1,5 +1,5 @@
 // Unified API client with separate client vs admin surfaces.
-// CLIENT: /api/cameras returns { cameras: [...] } with low_url/high_url
+// CLIENT: /api/cameras returns { cameras: [...] } with URLs keyed by role name
 // ADMIN: camera CRUD, streams, roles, and medium/high on-demand controls.
 
 const API = {

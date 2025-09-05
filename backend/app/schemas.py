@@ -1,5 +1,5 @@
 # backend/app/schemas.py
-from typing import Optional, List
+from typing import Optional, List, Dict
 from pydantic import BaseModel
 from .models import RoleMode  # Enum: "auto" | "manual" | "disabled"
 
@@ -87,8 +87,7 @@ class CameraAdminOut(BaseModel):
 class CameraClientItem(BaseModel):
     id: str
     name: str
-    low_url: str
-    high_url: str
+    urls: Dict[str, str]  # role -> url
 
 class CameraClientList(BaseModel):
     cameras: List[CameraClientItem]

@@ -41,7 +41,8 @@ final class CamerasViewModel: ObservableObject {
         gridPlayers.removeAll()
 
         for cam in cams {
-            let p = AVPlayer(url: cam.lowURL)
+            guard let url = cam.urls["grid"] else { continue }
+            let p = AVPlayer(url: url)
             p.isMuted = true
             // Auto-play
             p.play()

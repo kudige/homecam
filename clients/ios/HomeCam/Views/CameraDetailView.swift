@@ -31,10 +31,12 @@ struct CameraDetailView: View {
         }
         .onAppear {
             // Build the high-res player fresh (keeps grid paused)
-            let p = AVPlayer(url: camera.highURL)
-            p.automaticallyWaitsToMinimizeStalling = true
-            p.isMuted = false
-            player = p
+            if let url = camera.urls["high"] ?? camera.urls["medium"] ?? camera.urls["grid"] {
+                let p = AVPlayer(url: url)
+                p.automaticallyWaitsToMinimizeStalling = true
+                p.isMuted = false
+                player = p
+            }
         }
         .onDisappear {
             player?.pause()
