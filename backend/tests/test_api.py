@@ -59,6 +59,12 @@ def test_camera_crud(api_client):
     assert len(cams) == 1
     assert cams[0]["id"] == cam_id
 
+    # Client API should expose relative URLs
+    resp = client.get("/api/cameras")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["cameras"][0]["urls"]["grid"] == f"/media/live/{payload['name']}/grid/index.m3u8"
+
     # Delete the camera
     resp = client.delete(f"/api/admin/cameras/{cam_id}")
     assert resp.status_code == 200
