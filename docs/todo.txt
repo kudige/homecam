@@ -1,0 +1,8 @@
+Add authentication (JWT, HTTPS) before production use.
+
+iOS/Android: use native HLS players (AVPlayer, ExoPlayer) for best performance.
+
+For WebViews: hls.js is usable.
+
+Recording search by time range could be added with a new endpoint returning merged HLS/VOD.
+
