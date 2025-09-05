@@ -1,5 +1,5 @@
 # backend/app/main.py
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -309,7 +309,7 @@ def start_grid(cam_id: int, session: Session = Depends(get_session)):
 # ----------------------------- Client API (no RTSP) -------------------------------
 
 @app.get("/api/cameras", response_model=CameraClientList)
-def client_list_cameras(request: Request, session: Session = Depends(get_session)):
+def client_list_cameras(session: Session = Depends(get_session)):
     """
     Returns:
     {
@@ -318,9 +318,9 @@ def client_list_cameras(request: Request, session: Session = Depends(get_session
           "id": "1",
           "name": "Front Door",
           "urls": {
-            "grid":   "http://<server>/media/live/<camera>/grid/index.m3u8",
-            "medium": "http://<server>/media/live/<camera>/medium/index.m3u8",
-            "high":   "http://<server>/media/live/<camera>/high/index.m3u8"
+            "grid":   "/media/live/<camera>/grid/index.m3u8",
+            "medium": "/media/live/<camera>/medium/index.m3u8",
+            "high":   "/media/live/<camera>/high/index.m3u8"
           }
         },
         ...
@@ -328,11 +328,10 @@ def client_list_cameras(request: Request, session: Session = Depends(get_session
     }
     """
     cams = session.query(Camera).order_by(Camera.id.asc()).all()
-    base = str(request.base_url).rstrip("/")  # e.g. http://localhost:8091
     items: list[CameraClientItem] = []
     for cam in cams:
         urls = {
-            role: f"{base}/media/live/{cam.name}/{role}/index.m3u8"
+            role: f"/media/live/{cam.name}/{role}/index.m3u8"
             for role in ("grid", "medium", "high")
         }
         items.append(CameraClientItem(
