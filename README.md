@@ -5,7 +5,7 @@ A minimal home camera system: RTSP in → HLS live grid + recorded chunks, with 
 ## Features
 - Add cameras with RTSP URLs and retention days.
 - Live grid (low-res) and high-res view per camera.
-- Continuous recording into 5-minute MP4 chunks.
+- Continuous recording into 5-minute MP4 chunks (default, configurable).
 - Browse recordings by camera + date and play chunks.
 - Daily retention cleanup.
 
@@ -42,6 +42,16 @@ open http://localhost:8090
 
 * Runs daily in the backend container.
 * Default = 7 days; per-camera can be configured when adding/updating a camera.
+
+### Recording segment length
+
+* Recording segments default to 5 minutes (300 seconds).
+* To change the duration, set the `RECORDING_SEGMENT_SEC` environment variable
+  (or add it to a `.env` file) with the desired number of seconds, e.g.,
+
+  ```bash
+  echo "RECORDING_SEGMENT_SEC=60" >> .env  # 1-minute segments
+  ```
 
 ## Dev Mode (no Docker)
 
