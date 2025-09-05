@@ -125,6 +125,7 @@ class FFmpegManager:
         self._inflight: set[Tuple[int, str]] = set()
         self._cam_names: Dict[int, str] = {}  # cam_id -> cam_name
         self._leases = LeaseTracker()
+        self._configs: Dict[int, Dict[str, dict]] = {}
 
         threading.Thread(target=self._idle_reaper, daemon=True).start()
 
@@ -204,11 +205,28 @@ class FFmpegManager:
             self._inflight.discard(key)
             # mark role active so reaper doesn't stop immediately
             self._leases.mark_activity(cam_id, role)
+            self._configs.setdefault(cam_id, {})[role] = {
+                "cam_name": cam_name,
+                "src": src,
+                "crf": crf,
+                "scale_w": scale_w,
+                "scale_h": scale_h,
+            }
+            threading.Thread(
+                target=self._wait_and_restart,
+                args=(cam_id, role, new_proc),
+                daemon=True,
+            ).start()
             return {"ok": True}
 
     def stop_role(self, cam_id: int, cam_name: str, role: str):
         with self._lock:
             p = (self._procs.get(cam_id) or {}).pop(role, None)
+            cfgs = self._configs.get(cam_id)
+            if cfgs:
+                cfgs.pop(role, None)
+                if not cfgs:
+                    self._configs.pop(cam_id, None)
         if p:
             try:
                 if _alive(p):
@@ -226,6 +244,7 @@ class FFmpegManager:
         with self._lock:
             procs_by_role = self._procs.pop(cam_id, {}) or {}
             self._cam_names.pop(cam_id, None)
+            self._configs.pop(cam_id, None)
         for role, p in procs_by_role.items():
             try:
                 if _alive(p):
@@ -401,9 +420,81 @@ class FFmpegManager:
             except Exception:
                 logger.exception("Idle reaper error")
 
+    def _wait_and_restart(self, cam_id: int, role: str, proc: subprocess.Popen):
+        rc = proc.wait()
+        with self._lock:
+            current = (self._procs.get(cam_id) or {}).get(role)
+            cfg = (self._configs.get(cam_id) or {}).get(role)
+            lease_count = self._leases.count(cam_id, role)
+        cam_obj = None
+        try:
+            from .db import SessionLocal  # pylint: disable=import-outside-toplevel
+            from .models import Camera  # pylint: disable=import-outside-toplevel
+            with SessionLocal() as session:
+                cam_obj = session.get(Camera, cam_id)
+        except Exception:  # pragma: no cover - best effort
+            cam_obj = None
+
+        if cam_obj:
+            try:
+                src, sw, sh, run = resolve_role(cam_obj, role)
+                if run and src:
+                    cfg = {
+                        "cam_name": cam_obj.name,
+                        "src": src,
+                        "crf": cam_obj.low_crf if role in {"grid", "medium"} else cam_obj.high_crf,
+                        "scale_w": sw,
+                        "scale_h": sh,
+                    }
+                else:
+                    cfg = None
+            except Exception:  # pragma: no cover - resolver errors shouldn't crash watcher
+                cfg = cfg
+
+        should_run = cfg is not None
+        if role in {"medium", "high"}:
+            should_run = should_run and lease_count > 0
+
+        if not should_run:
+            # Remove stale bookkeeping; thread exits without restart
+            with self._lock:
+                procs = self._procs.get(cam_id)
+                if procs and procs.get(role) is proc:
+                    procs.pop(role, None)
+                    if not procs:
+                        self._procs.pop(cam_id, None)
+                cfgs = self._configs.get(cam_id)
+                if cfgs:
+                    cfgs.pop(role, None)
+                    if not cfgs:
+                        self._configs.pop(cam_id, None)
+            return
+
+        if current is proc:
+            logger.warning(
+                "FFmpeg process exited rc=%s; restarting cam_id=%s role=%s",
+                rc,
+                cam_id,
+                role,
+            )
+            self.start_role(
+                cam_id=cam_id,
+                cam_name=cfg["cam_name"],
+                role=role,
+                src=cfg["src"],
+                crf=cfg["crf"],
+                scale_w=cfg.get("scale_w"),
+                scale_h=cfg.get("scale_h"),
+            )
+
     def _stop_role_internal(self, cam_id: int, role: str):
         with self._lock:
             p = (self._procs.get(cam_id) or {}).pop(role, None)
+            cfgs = self._configs.get(cam_id)
+            if cfgs:
+                cfgs.pop(role, None)
+                if not cfgs:
+                    self._configs.pop(cam_id, None)
         if p:
             try:
                 if _alive(p):
