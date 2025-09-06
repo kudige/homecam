@@ -55,6 +55,7 @@ class LeaseTracker:
         self._leases: Dict[Tuple[int, str], Dict[str, float]] = {}
         self._idle_since: Dict[Tuple[int, str], float] = {}
         self._last_seen: Dict[Tuple[int, str], float] = {}
+        self._ttl = getattr(settings, "LEASE_TIMEOUT_SEC", 60)
 
     def acquire(self, cam_id: int, role: str) -> str:
         import uuid
@@ -83,9 +84,28 @@ class LeaseTracker:
                     # became idle now
                     self._idle_since[(cam_id, role)] = time.time()
 
-    def count(self, cam_id: int, role: str) -> int:
+    def _prune_expired(self, key: Tuple[int, str]):
+        leases = self._leases.get(key)
+        if not leases:
+            return
+        now = time.time()
+        expired = [lid for lid, ts in leases.items() if now - ts > self._ttl]
+        for lid in expired:
+            leases.pop(lid, None)
+        if expired:
+            if leases:
+                self._last_seen[key] = max(leases.values())
+            else:
+                self._idle_since[key] = now
+
+    def snap_count(self, cam_id: int, role: str) -> int:
+        key = (cam_id, role)
         with self._lock:
-            return len(self._leases.get((cam_id, role), {}))
+            self._prune_expired(key)
+            return len(self._leases.get(key, {}))
+
+    def count(self, cam_id: int, role: str) -> int:
+        return self.snap_count(cam_id, role)
 
     def mark_activity(self, cam_id: int, role: str):
         """Record activity (e.g., on start); clears idle timer while active."""
@@ -102,10 +122,12 @@ class LeaseTracker:
 
     def snapshot_counts(self, cam_id: int) -> Dict[str, int]:
         with self._lock:
-            return {
-                r: len(self._leases.get((cam_id, r), {}))
-                for r in ("grid", "medium", "high", "recording")
-            }
+            out: Dict[str, int] = {}
+            for r in ("grid", "medium", "high", "recording"):
+                key = (cam_id, r)
+                self._prune_expired(key)
+                out[r] = len(self._leases.get(key, {}))
+            return out
 
 
 # ----------------------------- Manager -----------------------------
@@ -423,12 +445,27 @@ class FFmpegManager:
                             # not running anyway; continue
                             continue
                         # if anyone is watching, keep it
-                        if self._leases.count(cam_id, role) > 0:
+                        lease_count = self._leases.snap_count(cam_id, role)
+                        if lease_count > 0:
+                            logger.debug(
+                                "Reaper keep cam_id=%s role=%s active_leases=%s",
+                                cam_id,
+                                role,
+                                lease_count,
+                            )
                             continue
                         # no leases: check idle duration
                         idle_s = self._leases.idle_for(cam_id, role)
+                        logger.debug(
+                            "Reaper idle cam_id=%s role=%s idle=%ss", cam_id, role, int(idle_s)
+                        )
                         if idle_s and idle_s > timeout:
-                            logger.info("Auto-stopping cam_id=%s role=%s after idle %ss", cam_id, role, int(idle_s))
+                            logger.info(
+                                "Auto-stopping cam_id=%s role=%s after idle %ss",
+                                cam_id,
+                                role,
+                                int(idle_s),
+                            )
                             # prefer full stop with cleanup if we have cam_name
                             if cam_name:
                                 self.stop_role(cam_id, cam_name, role)
@@ -443,7 +480,7 @@ class FFmpegManager:
         with self._lock:
             current = (self._procs.get(cam_id) or {}).get(role)
             cfg = (self._configs.get(cam_id) or {}).get(role)
-            lease_count = self._leases.count(cam_id, role)
+            lease_count = self._leases.snap_count(cam_id, role)
         cam_obj = None
         try:
             from .db import SessionLocal  # pylint: disable=import-outside-toplevel
