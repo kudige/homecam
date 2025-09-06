@@ -434,7 +434,6 @@ class FFmpegManager:
         logger.info("Idle reaper started: interval=%ss timeout=%ss", interval, timeout)
         while True:
             time.sleep(interval)
-            logger.info("Reaper running")
             try:
                 # snapshot keys to avoid holding lock during stops
                 with self._lock:
@@ -444,7 +443,6 @@ class FFmpegManager:
                     with self._lock:
                         roles_map = dict(self._procs.get(cam_id, {}))
                         cam_name = self._cam_names.get(cam_id)
-                    logger.info("Reaper for cam %s", cam_name)
                     for role in ("medium", "high"):
                         p = roles_map.get(role)
                         if not _alive(p):
