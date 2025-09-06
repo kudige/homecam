@@ -1,7 +1,6 @@
 # backend/app/main.py
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 import logging
@@ -26,6 +25,7 @@ from .schemas import (
     RecordingFile,
 )
 from .ffmpeg_manager import ffmpeg_manager
+from .lease_static import LeaseRenewStaticFiles
 from .recordings import list_recordings
 from .config import settings, MEDIA_ROOT, LIVE_DIR, REC_DIR
 from .retention import run_retention_loop
@@ -71,7 +71,7 @@ REC_DIR.mkdir(parents=True, exist_ok=True)
 Base.metadata.create_all(bind=engine)
 
 # Serve /media (used by both dev and docker)
-app.mount("/media", StaticFiles(directory=str(MEDIA_ROOT)), name="media")
+app.mount("/media", LeaseRenewStaticFiles(directory=str(MEDIA_ROOT)), name="media")
 
 # Background retention loop (daily)
 threading.Thread(target=run_retention_loop, args=(get_session,), daemon=True).start()
