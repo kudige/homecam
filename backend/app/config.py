@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     RECORDINGS_ROOT: str | None = None
     DB_PATH: str = "/data/homecam.db"
     LOG_LEVEL: str = "INFO"
-    RECORDING_SEGMENT_SEC: int = 300
+    RECORDING_SEGMENT_SEC: int = 3600
     DEFAULT_RETENTION_DAYS: int = 7
     IDLE_REAPER_INTERVAL_SEC: int = 10
     ROLE_IDLE_TIMEOUT_SEC: int = 120
