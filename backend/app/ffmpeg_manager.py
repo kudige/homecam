@@ -75,7 +75,8 @@ class LeaseTracker:
             if leases and lease_id in leases:
                 leases[lease_id] = now
                 self._last_seen[(cam_id, role)] = now
-
+        logger.info("lease renew cam_id %s role %s leases %s", cam_id, role, str(leases))
+        
     def release(self, cam_id: int, role: str, lease_id: str):
         with self._lock:
             leases = self._leases.get((cam_id, role))
@@ -430,6 +431,7 @@ class FFmpegManager:
         logger.info("Idle reaper started: interval=%ss timeout=%ss", interval, timeout)
         while True:
             time.sleep(interval)
+            logger.info("Reaper running")
             try:
                 # snapshot keys to avoid holding lock during stops
                 with self._lock:
@@ -439,6 +441,7 @@ class FFmpegManager:
                     with self._lock:
                         roles_map = dict(self._procs.get(cam_id, {}))
                         cam_name = self._cam_names.get(cam_id)
+                    logger.info("Reaper for cam %s", cam_name)
                     for role in ("medium", "high"):
                         p = roles_map.get(role)
                         if not _alive(p):
@@ -446,17 +449,17 @@ class FFmpegManager:
                             continue
                         # if anyone is watching, keep it
                         lease_count = self._leases.snap_count(cam_id, role)
+                        logger.info(
+                            "Reaper keep cam_id=%s role=%s active_leases=%s",
+                            cam_id,
+                            role,
+                            lease_count,
+                        )
                         if lease_count > 0:
-                            logger.debug(
-                                "Reaper keep cam_id=%s role=%s active_leases=%s",
-                                cam_id,
-                                role,
-                                lease_count,
-                            )
                             continue
                         # no leases: check idle duration
                         idle_s = self._leases.idle_for(cam_id, role)
-                        logger.debug(
+                        logger.info(
                             "Reaper idle cam_id=%s role=%s idle=%ss", cam_id, role, int(idle_s)
                         )
                         if idle_s and idle_s > timeout:
