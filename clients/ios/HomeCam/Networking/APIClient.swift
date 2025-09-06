@@ -16,6 +16,24 @@ final class APIClient {
             throw URLError(.badServerResponse)
         }
         let decoded = try JSONDecoder().decode(CameraListResponse.self, from: data)
-        return decoded.cameras
+
+        // The API may return camera URLs without a host section.  Patch any
+        // relative URLs to include the host from the server base before
+        // returning them to the caller.
+        let patched = decoded.cameras.map { cam -> Camera in
+            var newURLs: [String: URL] = [:]
+            for (role, url) in cam.urls {
+                if url.host == nil {
+                    // Build an absolute URL using the server's base URL.
+                    let absolute = URL(string: url.relativeString, relativeTo: serverBase)!.absoluteURL
+                    newURLs[role] = absolute
+                } else {
+                    newURLs[role] = url
+                }
+            }
+            return Camera(id: cam.id, name: cam.name, urls: newURLs)
+        }
+
+        return patched
     }
 }
