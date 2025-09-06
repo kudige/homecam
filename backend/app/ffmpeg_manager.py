@@ -68,14 +68,17 @@ class LeaseTracker:
             self._idle_since.pop((cam_id, role), None)
         return lid
 
-    def renew(self, cam_id: int, role: str, lease_id: str):
+    def renew(self, cam_id: int, role: str, lease_id: str) -> bool:
         now = time.time()
+        success = False
         with self._lock:
             leases = self._leases.get((cam_id, role))
             if leases and lease_id in leases:
                 leases[lease_id] = now
                 self._last_seen[(cam_id, role)] = now
+                success = True
         logger.info("lease renew cam_id %s role %s leases %s", cam_id, role, str(leases))
+        return success
         
     def release(self, cam_id: int, role: str, lease_id: str):
         with self._lock:
@@ -158,8 +161,8 @@ class FFmpegManager:
     def acquire_lease(self, cam_id: int, role: str) -> str:
         return self._leases.acquire(cam_id, role)
 
-    def renew_lease(self, cam_id: int, role: str, lease_id: str):
-        self._leases.renew(cam_id, role, lease_id)
+    def renew_lease(self, cam_id: int, role: str, lease_id: str) -> bool:
+        return self._leases.renew(cam_id, role, lease_id)
 
     def release_lease(self, cam_id: int, role: str, lease_id: str):
         self._leases.release(cam_id, role, lease_id)

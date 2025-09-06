@@ -33,11 +33,9 @@ class LeaseRenewStaticFiles(StaticFiles):
                     if cam_id is not None:
                         key = (cam_id, role)
                         lease_id = self._leases.get(key)
-                        if lease_id is None:
+                        if lease_id is None or not ffmpeg_manager.renew_lease(cam_id, role, lease_id):
                             lease_id = ffmpeg_manager.acquire_lease(cam_id, role)
                             self._leases[key] = lease_id
-                        else:
-                            ffmpeg_manager.renew_lease(cam_id, role, lease_id)
         except Exception:  # pragma: no cover - best effort logging
             logger.exception("lease renew error")
 
