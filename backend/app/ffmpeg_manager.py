@@ -305,14 +305,18 @@ class FFmpegManager:
         if scale_w and scale_h:
             vf = ["-vf", f"scale={scale_w}:{scale_h}"]  # only used for grid/auto
 
-        audio = ["-an"] if role == "grid" else ["-c:a", "aac", "-ar", "44100", "-ac", "1"]
+        mapping = ["-map", "0:v"]
+        audio = ["-an"]
+        if role != "grid":
+            mapping += ["-map", "0:a?"]
+            audio = ["-c:a", "aac", "-ar", "44100", "-ac", "1"]
 
         cmd = [
             "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "warning",
             "-rtsp_transport", "tcp",
             "-i", src,
             "-fflags", "+genpts",
-            "-map", "0:v",
+            *mapping,
             *vf, *enc, *audio,
             *_hls_opts(seg, "12"),
             "-hls_segment_filename", str(out_dir / "segment_%06d.ts"),
