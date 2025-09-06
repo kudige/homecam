@@ -128,8 +128,17 @@ class FFmpegManager:
         self._auto_leases: Dict[Tuple[int, str], str] = {}
         self._lease_timers: Dict[Tuple[int, str], threading.Timer] = {}
         self._lease_sec = getattr(settings, "ROLE_AUTO_LEASE_SEC", 120)
+        self._reaper_interval = getattr(settings, "IDLE_REAPER_INTERVAL_SEC", 10)
+        self._reaper_timeout = getattr(settings, "ROLE_IDLE_TIMEOUT_SEC", 120)
 
-        threading.Thread(target=self._idle_reaper, daemon=True).start()
+        if self._reaper_interval > 0 and self._reaper_timeout > 0:
+            threading.Thread(target=self._idle_reaper, daemon=True).start()
+        else:
+            logger.info(
+                "Idle reaper disabled: interval=%s timeout=%s",
+                self._reaper_interval,
+                self._reaper_timeout,
+            )
 
     # ---------- public: leases ----------
 
@@ -397,8 +406,8 @@ class FFmpegManager:
     # ---------- idle reaper ----------
 
     def _idle_reaper(self):
-        interval = getattr(settings, "IDLE_REAPER_INTERVAL_SEC", 10)
-        timeout = getattr(settings, "ROLE_IDLE_TIMEOUT_SEC", 120)
+        interval = self._reaper_interval
+        timeout = self._reaper_timeout
         logger.info("Idle reaper started: interval=%ss timeout=%ss", interval, timeout)
         while True:
             time.sleep(interval)
