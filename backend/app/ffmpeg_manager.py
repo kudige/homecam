@@ -55,6 +55,7 @@ class LeaseTracker:
         self._leases: Dict[Tuple[int, str], Dict[str, float]] = {}
         self._idle_since: Dict[Tuple[int, str], float] = {}
         self._last_seen: Dict[Tuple[int, str], float] = {}
+        self._ttl = getattr(settings, "LEASE_TIMEOUT_SEC", 60)
 
     def acquire(self, cam_id: int, role: str) -> str:
         import uuid
@@ -74,7 +75,8 @@ class LeaseTracker:
             if leases and lease_id in leases:
                 leases[lease_id] = now
                 self._last_seen[(cam_id, role)] = now
-
+        logger.info("lease renew cam_id %s role %s leases %s", cam_id, role, str(leases))
+        
     def release(self, cam_id: int, role: str, lease_id: str):
         with self._lock:
             leases = self._leases.get((cam_id, role))
@@ -83,9 +85,28 @@ class LeaseTracker:
                     # became idle now
                     self._idle_since[(cam_id, role)] = time.time()
 
-    def count(self, cam_id: int, role: str) -> int:
+    def _prune_expired(self, key: Tuple[int, str]):
+        leases = self._leases.get(key)
+        if not leases:
+            return
+        now = time.time()
+        expired = [lid for lid, ts in leases.items() if now - ts > self._ttl]
+        for lid in expired:
+            leases.pop(lid, None)
+        if expired:
+            if leases:
+                self._last_seen[key] = max(leases.values())
+            else:
+                self._idle_since[key] = now
+
+    def snap_count(self, cam_id: int, role: str) -> int:
+        key = (cam_id, role)
         with self._lock:
-            return len(self._leases.get((cam_id, role), {}))
+            self._prune_expired(key)
+            return len(self._leases.get(key, {}))
+
+    def count(self, cam_id: int, role: str) -> int:
+        return self.snap_count(cam_id, role)
 
     def mark_activity(self, cam_id: int, role: str):
         """Record activity (e.g., on start); clears idle timer while active."""
@@ -102,10 +123,12 @@ class LeaseTracker:
 
     def snapshot_counts(self, cam_id: int) -> Dict[str, int]:
         with self._lock:
-            return {
-                r: len(self._leases.get((cam_id, r), {}))
-                for r in ("grid", "medium", "high", "recording")
-            }
+            out: Dict[str, int] = {}
+            for r in ("grid", "medium", "high", "recording"):
+                key = (cam_id, r)
+                self._prune_expired(key)
+                out[r] = len(self._leases.get(key, {}))
+            return out
 
 
 # ----------------------------- Manager -----------------------------
@@ -126,6 +149,7 @@ class FFmpegManager:
         self._cam_names: Dict[int, str] = {}  # cam_id -> cam_name
         self._leases = LeaseTracker()
         self._configs: Dict[int, Dict[str, dict]] = {}
+        self._shutting_down = False
 
         threading.Thread(target=self._idle_reaper, daemon=True).start()
 
@@ -217,6 +241,7 @@ class FFmpegManager:
                 args=(cam_id, role, new_proc),
                 daemon=True,
             ).start()
+            logger.info("Started cam_id=%s role=%s", cam_id, role)
             return {"ok": True}
 
     def stop_role(self, cam_id: int, cam_name: str, role: str):
@@ -239,6 +264,7 @@ class FFmpegManager:
                     pass
         # cleanup files
         self._cleanup_live_role(cam_name, role)
+        logger.info("Stopped cam_id=%s role=%s", cam_id, role)
 
     def stop_camera(self, cam_id: int, cam_name: str):
         with self._lock:
@@ -256,6 +282,17 @@ class FFmpegManager:
                 except Exception:
                     pass
         self._cleanup_live_all(cam_name)
+        logger.info("Stopped camera %s cam_id=%s", cam_name, cam_id)
+
+    def shutdown(self):
+        """Stop all running ffmpeg processes without triggering restarts."""
+        logger.info("FFmpegManager shutdown initiated")
+        self._shutting_down = True
+        with self._lock:
+            cam_ids = list(self._procs.keys())
+        for cam_id in cam_ids:
+            cam_name = self._cam_names.get(cam_id) or str(cam_id)
+            self.stop_camera(cam_id, cam_name)
 
     def status(self, cam_id: int) -> dict:
         with self._lock:
@@ -291,14 +328,18 @@ class FFmpegManager:
         if scale_w and scale_h:
             vf = ["-vf", f"scale={scale_w}:{scale_h}"]  # only used for grid/auto
 
-        audio = ["-an"] if role == "grid" else ["-c:a", "aac", "-ar", "44100", "-ac", "1"]
+        mapping = ["-map", "0:v"]
+        audio = ["-an"]
+        if role != "grid":
+            mapping += ["-map", "0:a?"]
+            audio = ["-c:a", "aac", "-ar", "44100", "-ac", "1"]
 
         cmd = [
             "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "warning",
             "-rtsp_transport", "tcp",
             "-i", src,
             "-fflags", "+genpts",
-            "-map", "0:v",
+            *mapping,
             *vf, *enc, *audio,
             *_hls_opts(seg, "12"),
             "-hls_segment_filename", str(out_dir / "segment_%06d.ts"),
@@ -390,6 +431,7 @@ class FFmpegManager:
         logger.info("Idle reaper started: interval=%ss timeout=%ss", interval, timeout)
         while True:
             time.sleep(interval)
+            logger.info("Reaper running")
             try:
                 # snapshot keys to avoid holding lock during stops
                 with self._lock:
@@ -399,18 +441,34 @@ class FFmpegManager:
                     with self._lock:
                         roles_map = dict(self._procs.get(cam_id, {}))
                         cam_name = self._cam_names.get(cam_id)
+                    logger.info("Reaper for cam %s", cam_name)
                     for role in ("medium", "high"):
                         p = roles_map.get(role)
                         if not _alive(p):
                             # not running anyway; continue
                             continue
                         # if anyone is watching, keep it
-                        if self._leases.count(cam_id, role) > 0:
+                        lease_count = self._leases.snap_count(cam_id, role)
+                        logger.info(
+                            "Reaper keep cam_id=%s role=%s active_leases=%s",
+                            cam_id,
+                            role,
+                            lease_count,
+                        )
+                        if lease_count > 0:
                             continue
                         # no leases: check idle duration
                         idle_s = self._leases.idle_for(cam_id, role)
+                        logger.info(
+                            "Reaper idle cam_id=%s role=%s idle=%ss", cam_id, role, int(idle_s)
+                        )
                         if idle_s and idle_s > timeout:
-                            logger.info("Auto-stopping cam_id=%s role=%s after idle %ss", cam_id, role, int(idle_s))
+                            logger.info(
+                                "Auto-stopping cam_id=%s role=%s after idle %ss",
+                                cam_id,
+                                role,
+                                int(idle_s),
+                            )
                             # prefer full stop with cleanup if we have cam_name
                             if cam_name:
                                 self.stop_role(cam_id, cam_name, role)
@@ -425,7 +483,7 @@ class FFmpegManager:
         with self._lock:
             current = (self._procs.get(cam_id) or {}).get(role)
             cfg = (self._configs.get(cam_id) or {}).get(role)
-            lease_count = self._leases.count(cam_id, role)
+            lease_count = self._leases.snap_count(cam_id, role)
         cam_obj = None
         try:
             from .db import SessionLocal  # pylint: disable=import-outside-toplevel
@@ -454,6 +512,8 @@ class FFmpegManager:
         should_run = cfg is not None
         if role in {"medium", "high"}:
             should_run = should_run and lease_count > 0
+        if self._shutting_down:
+            should_run = False
 
         if not should_run:
             # Remove stale bookkeeping; thread exits without restart

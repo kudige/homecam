@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     DEFAULT_RETENTION_DAYS: int = 7
     IDLE_REAPER_INTERVAL_SEC: int = 10
     ROLE_IDLE_TIMEOUT_SEC: int = 120
+    LEASE_TIMEOUT_SEC: int = 60
 
     # NEW: debug/ops switch for how many outputs we spawn
     #   - "all": low + high + recordings (default)

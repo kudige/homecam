@@ -1,9 +1,11 @@
 # backend/app/main.py
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
+import logging
+import time
 from sqlalchemy.orm import Session
 import threading
 from typing import List
@@ -29,6 +31,27 @@ from .config import settings, MEDIA_ROOT, LIVE_DIR, REC_DIR
 from .retention import run_retention_loop
 
 app = FastAPI(title="HomeCam API", version="0.2.0")
+
+# Suppress default uvicorn access logs and re-emit them at debug level
+logging.getLogger("uvicorn.access").disabled = True
+access_logger = logging.getLogger("homecam.access")
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.time()
+    response = await call_next(request)
+    duration = (time.time() - start) * 1000
+    client = request.client
+    access_logger.debug(
+        "%s - \"%s %s\" %d %.2fms",
+        client.host if client else "-",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration,
+    )
+    return response
 
 # CORS (open for now; tighten later when adding auth)
 app.add_middleware(
@@ -100,6 +123,10 @@ def autostart():
                 src, sw, sh, run = resolve_role(cam,"recording")
                 if run and src: ffmpeg_manager.start_role(cam.id, cam.name, "recording", src, cam.high_crf)
     finally: s.close()
+
+@app.on_event("shutdown")
+def shutdown_event():
+    ffmpeg_manager.shutdown()
 
 @app.put("/api/admin/cameras/{cam_id}/roles", response_model=CameraAdminOut)
 def admin_update_roles(cam_id: int, body: CameraRoleUpdate, session: Session = Depends(get_session)):
