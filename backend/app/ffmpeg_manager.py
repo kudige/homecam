@@ -126,6 +126,7 @@ class FFmpegManager:
         self._cam_names: Dict[int, str] = {}  # cam_id -> cam_name
         self._leases = LeaseTracker()
         self._configs: Dict[int, Dict[str, dict]] = {}
+        self._shutting_down = False
 
         threading.Thread(target=self._idle_reaper, daemon=True).start()
 
@@ -217,6 +218,7 @@ class FFmpegManager:
                 args=(cam_id, role, new_proc),
                 daemon=True,
             ).start()
+            logger.info("Started cam_id=%s role=%s", cam_id, role)
             return {"ok": True}
 
     def stop_role(self, cam_id: int, cam_name: str, role: str):
@@ -239,6 +241,7 @@ class FFmpegManager:
                     pass
         # cleanup files
         self._cleanup_live_role(cam_name, role)
+        logger.info("Stopped cam_id=%s role=%s", cam_id, role)
 
     def stop_camera(self, cam_id: int, cam_name: str):
         with self._lock:
@@ -256,6 +259,17 @@ class FFmpegManager:
                 except Exception:
                     pass
         self._cleanup_live_all(cam_name)
+        logger.info("Stopped camera %s cam_id=%s", cam_name, cam_id)
+
+    def shutdown(self):
+        """Stop all running ffmpeg processes without triggering restarts."""
+        logger.info("FFmpegManager shutdown initiated")
+        self._shutting_down = True
+        with self._lock:
+            cam_ids = list(self._procs.keys())
+        for cam_id in cam_ids:
+            cam_name = self._cam_names.get(cam_id) or str(cam_id)
+            self.stop_camera(cam_id, cam_name)
 
     def status(self, cam_id: int) -> dict:
         with self._lock:
@@ -454,6 +468,8 @@ class FFmpegManager:
         should_run = cfg is not None
         if role in {"medium", "high"}:
             should_run = should_run and lease_count > 0
+        if self._shutting_down:
+            should_run = False
 
         if not should_run:
             # Remove stale bookkeeping; thread exits without restart
