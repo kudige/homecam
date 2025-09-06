@@ -17,7 +17,7 @@ export default function CameraCard({ cam }) {
   }
   async function openRole(role, startPath){
     const name = encodeURIComponent(cam.name)
-    const url = `/media/live/${name}/${role}/index.m3u8`
+    const url = `/media/live/${name}/${role}/index.m3u8?t=${Date.now()}`
     if (startPath){
       const res = await fetch(startPath, { method:'POST' })
       const j = await res.json().catch(()=>({}))

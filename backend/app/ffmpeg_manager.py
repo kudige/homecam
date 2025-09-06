@@ -125,6 +125,9 @@ class FFmpegManager:
         self._inflight: set[Tuple[int, str]] = set()
         self._cam_names: Dict[int, str] = {}  # cam_id -> cam_name
         self._leases = LeaseTracker()
+        self._auto_leases: Dict[Tuple[int, str], str] = {}
+        self._lease_timers: Dict[Tuple[int, str], threading.Timer] = {}
+        self._lease_sec = getattr(settings, "ROLE_AUTO_LEASE_SEC", 120)
 
         threading.Thread(target=self._idle_reaper, daemon=True).start()
 
@@ -138,6 +141,34 @@ class FFmpegManager:
 
     def release_lease(self, cam_id: int, role: str, lease_id: str):
         self._leases.release(cam_id, role, lease_id)
+
+    def touch_auto_lease(self, cam_id: int, role: str):
+        key = (cam_id, role)
+        with self._lock:
+            lid = self._auto_leases.get(key)
+            if lid is None:
+                lid = self._leases.acquire(cam_id, role)
+                self._auto_leases[key] = lid
+            else:
+                self._leases.renew(cam_id, role, lid)
+            timer = self._lease_timers.get(key)
+            if timer:
+                timer.cancel()
+            timer = threading.Timer(self._lease_sec, self._auto_release, args=(key, lid))
+            timer.daemon = True
+            self._lease_timers[key] = timer
+            timer.start()
+
+    def _auto_release(self, key: Tuple[int, str], lease_id: str):
+        with self._lock:
+            current = self._auto_leases.get(key)
+            if current != lease_id:
+                return
+            self._leases.release(key[0], key[1], lease_id)
+            self._auto_leases.pop(key, None)
+            t = self._lease_timers.pop(key, None)
+            if t:
+                t.cancel()
 
     # ---------- start/stop/status ----------
 

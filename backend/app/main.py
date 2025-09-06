@@ -1,5 +1,5 @@
 # backend/app/main.py
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -52,6 +52,30 @@ app.mount("/media", StaticFiles(directory=str(MEDIA_ROOT)), name="media")
 
 # Background retention loop (daily)
 threading.Thread(target=run_retention_loop, args=(get_session,), daemon=True).start()
+
+@app.middleware("http")
+async def auto_lease_middleware(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/media/live/"):
+        parts = path.split("/")
+        if len(parts) > 4:
+            cam_name = parts[3]
+            role = parts[4]
+            if role in ("medium", "high"):
+                from urllib.parse import unquote
+                try:
+                    cam_name = unquote(cam_name)
+                    s = SessionLocal()
+                    try:
+                        cam = s.query(Camera).filter_by(name=cam_name).first()
+                        if cam:
+                            ffmpeg_manager.touch_auto_lease(cam.id, role)
+                    finally:
+                        s.close()
+                except Exception:
+                    pass
+    return response
 
 def ensure_stream_probed(session: Session, s: CameraStream) -> CameraStream:
     """If stream has no width/height, run ffprobe and persist metadata."""

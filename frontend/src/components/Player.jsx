@@ -7,9 +7,15 @@ export default function Player({ src, autoPlay=true }){
     if (!src || !videoRef.current) return
     if (src.endsWith('.m3u8')){
       if (Hls.isSupported()){
-        const hls = new Hls()
+        const hls = new Hls({ startPosition:-1 })
         hls.loadSource(src)
         hls.attachMedia(videoRef.current)
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          const v = videoRef.current
+          if (v && v.seekable && v.seekable.length) {
+            try { v.currentTime = v.seekable.end(v.seekable.length-1) } catch {}
+          }
+        })
         return () => hls.destroy()
       } else {
         videoRef.current.src = src
