@@ -165,6 +165,7 @@ def start_medium(cam_id:int, session:Session=Depends(get_session)):
     src, sw, sh, run = resolve_role(cam,"medium")
     if not run or not src: return {"ok": False, "reason":"disabled"}
     ffmpeg_manager.start_role(cam.id, cam.name, "medium", src, cam.low_crf)
+    ffmpeg_manager.touch_auto_lease(cam.id, "medium")
     return {"ok": True}
 
 @app.post("/api/admin/cameras/{cam_id}/medium/stop")
@@ -179,6 +180,7 @@ def start_high(cam_id:int, session:Session=Depends(get_session)):
     src, sw, sh, run = resolve_role(cam,"high")
     if not run or not src: return {"ok": False, "reason":"disabled"}
     ffmpeg_manager.start_role(cam.id, cam.name, "high", src, cam.high_crf)
+    ffmpeg_manager.touch_auto_lease(cam.id, "high")
     return {"ok": True}
 
 @app.post("/api/admin/cameras/{cam_id}/high/stop")

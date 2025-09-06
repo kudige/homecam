@@ -15,14 +15,17 @@ export default function Player({ src, autoPlay=true }){
           if (v && v.seekable && v.seekable.length) {
             try { v.currentTime = v.seekable.end(v.seekable.length-1) } catch {}
           }
+          try { v?.play() } catch {}
         })
         return () => hls.destroy()
       } else {
         videoRef.current.src = src
+        videoRef.current.play().catch(()=>{})
       }
     } else {
       // MP4
       videoRef.current.src = src
+      videoRef.current.play().catch(()=>{})
     }
   }, [src])
   return <video ref={videoRef} controls autoPlay={autoPlay} playsInline style={{width:'100%', height:360, background:'#000'}} />
