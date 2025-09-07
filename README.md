@@ -44,6 +44,8 @@ docker run --rm -p 9001:9001 homecam --backend-only --api-port 9001
 docker run --rm -p 9000:9000 homecam --frontend-only --port 9000 --backend host:8091
 ```
 
+The `--backend` option causes the frontend to proxy both `/api/` and `/media/` requests to the given host and port.
+
 The repo also includes a `deploy/docker-compose.yml` which can be used in place of `docker run`. Supply environment variables via an `.env` file and pass options with the `command` field.
 
 ## Configuration

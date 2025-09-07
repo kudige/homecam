@@ -42,7 +42,7 @@ export PORT API_PORT API_BACKEND
 
 # render nginx config with env vars
 if [ -f /etc/nginx/nginx.conf.template ]; then
-  envsubst '${MEDIA_ROOT} ${PORT} ${API_BACKEND}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+  envsubst '${PORT} ${API_BACKEND}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
 fi
 
 start_backend() {
