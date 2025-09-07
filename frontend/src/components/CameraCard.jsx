@@ -8,7 +8,7 @@ export default function CameraCard({ cam }) {
   const hlsRef = useRef(null)
   const stallTimerRef = useRef(null)
   const [status, setStatus] = useState('idle') // idle | starting | playing | error
-  const [overlay, setOverlay] = useState({ open:false, title:'', src:'' })
+  const [overlay, setOverlay] = useState({ open:false, role:'medium', src:'' })
 
   // --- tiny helpers ---
   async function headOk(url){ try { const r=await fetch(url,{method:'HEAD',cache:'no-store'}); return r.ok } catch { return false } }
@@ -25,7 +25,7 @@ export default function CameraCard({ cam }) {
     }
     const ok = await waitFor(url)
     if (!ok){ alert(`${role} stream did not become ready in time.`); return }
-    setOverlay({ open:true, title: `${cam.name} — ${role.toUpperCase()}`, src:url })
+    setOverlay({ open:true, role, src:url })
   }
 
   // --- grid thumbnail player (compact, no controls) ---
@@ -79,66 +79,37 @@ export default function CameraCard({ cam }) {
     return () => { stopWatchdog(); if (hlsRef.current){ try{ hlsRef.current.destroy() }catch{}; hlsRef.current=null } }
   }, [cam.name])
 
-  // --- icon bar handlers ---
+  // --- overlay handlers ---
   const openMedium = () => openRole('medium', `/api/admin/cameras/${cam.id}/medium/start`)
-  const openHigh   = () => openRole('high',   `/api/admin/cameras/${cam.id}/high/start`)
+  const toggleRole = () => {
+    const next = overlay.role === 'medium' ? 'high' : 'medium'
+    const start = next === 'medium'
+      ? `/api/admin/cameras/${cam.id}/medium/start`
+      : `/api/admin/cameras/${cam.id}/high/start`
+    openRole(next, start)
+  }
 
   return (
-    <div className="card" style={{borderRadius:12}}>
-      {/* compact header with two tiny icons */}
-      <div style={headerRow}>
-        <div style={title}>{cam.name}</div>
-        <div style={iconRow}>
-          <button title="Open Medium" aria-label="Open Medium" style={iconBtn} onClick={openMedium}>
-            {/* medium icon (play triangle) */}
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" role="img">
-              <path d="M8 5v14l11-7-11-7z" stroke="currentColor" strokeWidth="1.6" fill="currentColor" />
-            </svg>
-          </button>
-          <button title="Open High" aria-label="Open High" style={iconBtn} onClick={openHigh}>
-            {/* high icon (magnifier) */}
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" role="img">
-              <circle cx="11" cy="11" r="6.5" stroke="currentColor" strokeWidth="1.6"/>
-              <path d="M16.5 16.5L21 21" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
-            </svg>
-          </button>
-        </div>
-      </div>
-
+    <div style={{borderRadius:12, overflow:'hidden'}}>
       <video
         ref={videoRef}
         muted
         autoPlay
         playsInline
         preload="auto"
+        onClick={openMedium}
         // no controls to keep compact
-        style={{ width:'100%', height:260, background:'#000', display:'block' }}
+        style={{ width:'100%', height:260, background:'#000', display:'block', cursor:'pointer' }}
       />
 
       {/* Overlay player for medium/high */}
       <OverlayPlayer
         open={overlay.open}
-        title={overlay.title}
+        role={overlay.role}
         src={overlay.src}
         onClose={()=>setOverlay(o=>({ ...o, open:false }))}
+        onToggle={toggleRole}
       />
     </div>
   )
-}
-
-const headerRow = {
-  display:'flex',
-  alignItems:'center',
-  justifyContent:'space-between',
-  padding:'6px 8px',
-  borderBottom:'1px solid #1f2630'
-}
-const title = { fontSize:13, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', maxWidth:'70%' }
-const iconRow = { display:'flex', gap:6 }
-const iconBtn = {
-  width:28, height:28,
-  display:'grid', placeItems:'center',
-  borderRadius:8, border:'1px solid #1f2630',
-  background:'#151a21', color:'#cad5e2',
-  cursor:'pointer'
 }
