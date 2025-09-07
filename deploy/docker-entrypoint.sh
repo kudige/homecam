@@ -58,4 +58,4 @@ case "$MODE" in
     start_frontend
     wait -n
     ;;
-fi
+esac
