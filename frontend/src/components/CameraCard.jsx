@@ -8,7 +8,7 @@ export default function CameraCard({ cam }) {
   const hlsRef = useRef(null)
   const stallTimerRef = useRef(null)
   const [status, setStatus] = useState('idle') // idle | starting | playing | error
-  const [overlay, setOverlay] = useState({ open:false, role:'medium', src:'' })
+  const [overlay, setOverlay] = useState({ open:false, role:'medium', src:'', loading:false })
 
   // --- tiny helpers ---
   async function headOk(url){ try { const r=await fetch(url,{method:'HEAD',cache:'no-store'}); return r.ok } catch { return false } }
@@ -18,14 +18,23 @@ export default function CameraCard({ cam }) {
   async function openRole(role, startPath){
     const name = encodeURIComponent(cam.name)
     const url = `/media/live/${name}/${role}/index.m3u8`
+    setOverlay({ open:true, role, src:'', loading:true })
     if (startPath){
       const res = await fetch(startPath, { method:'POST' })
       const j = await res.json().catch(()=>({}))
-      if (j && j.ok === false && j.reason) { alert(`Cannot start ${role}: ${j.reason}`); return }
+      if (j && j.ok === false && j.reason) {
+        alert(`Cannot start ${role}: ${j.reason}`)
+        setOverlay(o=>({ ...o, open:false, loading:false }))
+        return
+      }
     }
     const ok = await waitFor(url)
-    if (!ok){ alert(`${role} stream did not become ready in time.`); return }
-    setOverlay({ open:true, role, src:url })
+    if (!ok){
+      alert(`${role} stream did not become ready in time.`)
+      setOverlay(o=>({ ...o, open:false, loading:false }))
+      return
+    }
+    setOverlay({ open:true, role, src:url, loading:false })
   }
 
   // --- grid thumbnail player (compact, no controls) ---
@@ -107,8 +116,9 @@ export default function CameraCard({ cam }) {
         open={overlay.open}
         role={overlay.role}
         src={overlay.src}
-        onClose={()=>setOverlay(o=>({ ...o, open:false }))}
+        onClose={()=>setOverlay(o=>({ ...o, open:false, loading:false }))}
         onToggle={toggleRole}
+        loading={overlay.loading}
       />
     </div>
   )
