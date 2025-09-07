@@ -112,7 +112,7 @@ export default function CameraCard({ cam }) {
         playsInline
         preload="auto"
         // no controls to keep compact
-        style={{ width:'100%', height:160, background:'#000', display:'block' }}
+        style={{ width:'100%', height:260, background:'#000', display:'block' }}
       />
 
       {/* Overlay player for medium/high */}
