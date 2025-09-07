@@ -116,7 +116,8 @@ class LeaseTracker:
         now = time.time()
         with self._lock:
             self._last_seen[(cam_id, role)] = now
-            # do not set idle_since here; only set when last lease is released
+            # clear any prior idle time so reaper doesn't stop immediately
+            self._idle_since.pop((cam_id, role), None)
 
     def idle_for(self, cam_id: int, role: str) -> float:
         """Seconds since idle (no leases). 0 if not idle."""
