@@ -1,39 +1,101 @@
-// frontend/src/components/OverlayPlayer.jsx
-import React, { useEffect } from 'react'
+import React from 'react'
 import Player from './Player'
 
-export default function OverlayPlayer({ open, title, src, onClose }) {
-  useEffect(() => {
-    function onKey(e){ if (e.key === 'Escape') onClose?.() }
-    if (open) window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose])
-
+export default function OverlayPlayer({ open, role, src, loading, onClose, onToggle }) {
   if (!open) return null
+
+  const isMedium = role === 'medium'
+
   return (
-    <div style={backdrop}>
-      <div style={modal}>
-        <div style={header}>
-          <div style={{fontWeight:700}}>{title}</div>
-          <button className="btn secondary" onClick={onClose}>Close</button>
-        </div>
-        <div style={{padding:12}}>
-          <Player src={src} autoPlay />
-        </div>
+    <div style={wrapStyle} onClick={onClose}>
+      <div style={innerStyle} onClick={e => e.stopPropagation()}>
+        {loading ? (
+          <div style={loadingStyle}>Loading...</div>
+        ) : (
+          <Player src={src} />
+        )}
+        {!loading && (
+          <button
+            onClick={onToggle}
+            title={isMedium ? 'Switch to High' : 'Switch to Medium'}
+            aria-label={isMedium ? 'Switch to High' : 'Switch to Medium'}
+            style={toggleBtn}
+          >
+            {isMedium ? (
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" role="img">
+                <circle cx="11" cy="11" r="6.5" stroke="currentColor" strokeWidth="1.6"/>
+                <path d="M16.5 16.5L21 21" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
+              </svg>
+            ) : (
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" role="img">
+                <path d="M8 5v14l11-7-11-7z" stroke="currentColor" strokeWidth="1.6" fill="currentColor" />
+              </svg>
+            )}
+          </button>
+        )}
+        <button onClick={onClose} aria-label="Close" style={closeBtn}>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" role="img">
+            <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
+          </svg>
+        </button>
       </div>
     </div>
   )
 }
 
-const backdrop = {
-  position:'fixed', inset:0, background:'rgba(0,0,0,0.6)',
-  display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000
+const wrapStyle = {
+  position: 'fixed',
+  top: 0,
+  left: 0,
+  right: 0,
+  bottom: 0,
+  background: 'rgba(0,0,0,0.8)',
+  display: 'grid',
+  placeItems: 'center',
+  zIndex: 1000
 }
-const modal = {
-  width:'min(960px, 92vw)', background:'#0f1318', border:'1px solid #1f2630',
-  borderRadius:12, boxShadow:'0 20px 60px rgba(0,0,0,0.45)'
+
+const innerStyle = {
+  position: 'relative',
+  width: '80%',
+  maxWidth: 900
 }
-const header = {
-  display:'flex', alignItems:'center', justifyContent:'space-between',
-  padding:'12px 16px', borderBottom:'1px solid #1f2630'
+
+const loadingStyle = {
+  width: '100%',
+  height: 360,
+  display: 'grid',
+  placeItems: 'center',
+  color: '#fff',
+  background: '#000'
+}
+
+const toggleBtn = {
+  position: 'absolute',
+  top: 8,
+  right: 8,
+  width: 32,
+  height: 32,
+  display: 'grid',
+  placeItems: 'center',
+  border: 'none',
+  borderRadius: 4,
+  background: 'rgba(0,0,0,0.6)',
+  color: '#fff',
+  cursor: 'pointer'
+}
+
+const closeBtn = {
+  position: 'absolute',
+  top: 8,
+  right: 48,
+  width: 32,
+  height: 32,
+  display: 'grid',
+  placeItems: 'center',
+  border: 'none',
+  borderRadius: 4,
+  background: 'rgba(0,0,0,0.6)',
+  color: '#fff',
+  cursor: 'pointer'
 }
