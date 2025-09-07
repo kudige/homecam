@@ -1,12 +1,42 @@
 #!/usr/bin/env bash
 set -e
 
-# render nginx config with MEDIA_ROOT
-if [ -f /etc/nginx/nginx.conf.template ]; then
-  envsubst '${MEDIA_ROOT}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
-fi
+MODE="all"
+PORT="${PORT:-8090}"
+API_PORT="${API_PORT:-8091}"
 
-SERVICE_MODE="${SERVICE:-all}"
+# parse options
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --frontend-only)
+      MODE="frontend"
+      shift
+      ;;
+    --backend-only)
+      MODE="backend"
+      shift
+      ;;
+    --port)
+      PORT="$2"
+      shift 2
+      ;;
+    --api-port)
+      API_PORT="$2"
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+export PORT API_PORT
+
+# render nginx config with env vars
+if [ -f /etc/nginx/nginx.conf.template ]; then
+  envsubst '${MEDIA_ROOT} ${PORT} ${API_PORT}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+fi
 
 start_backend() {
   /start.sh &
@@ -16,7 +46,7 @@ start_frontend() {
   nginx -g 'daemon off;' &
 }
 
-case "$SERVICE_MODE" in
+case "$MODE" in
   backend)
     exec /start.sh
     ;;
@@ -28,4 +58,4 @@ case "$SERVICE_MODE" in
     start_frontend
     wait -n
     ;;
-esac
+fi

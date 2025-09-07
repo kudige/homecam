@@ -4,12 +4,6 @@ services:
     build:
       context: ..
     container_name: homecam
-    environment:
-      - MEDIA_ROOT=/media
-      - RECORDINGS_ROOT=/recordings
-      - DB_PATH=/data/homecam.db
-      # SERVICE can be 'all', 'backend', or 'frontend'
-      - SERVICE=all
     volumes:
       - /mnt/homecam/media:/media
       - /mnt/homecam/data:/data

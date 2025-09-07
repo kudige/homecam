@@ -16,27 +16,39 @@ A minimal home camera system: RTSP in → HLS live grid + recorded chunks, with 
 ## Quick Start (Docker)
 
 ```bash
-# In repo root
-cd deploy
-# Build image and launch (frontend + backend)
-docker compose up --build -d
+# Build image
+docker build -t homecam .
+
+# Run frontend + backend
+docker run -d --name homecam \
+  -p 8090:8090 -p 8091:8091 \
+  -v /mnt/homecam/media:/media \
+  -v /mnt/homecam/data:/data \
+  -v /mnt/homecam:/recordings \
+  -e MEDIA_ROOT=/media \
+  -e DB_PATH=/data/homecam.db \
+  -e RECORDINGS_ROOT=/recordings \
+  homecam
 
 # Open
 open http://localhost:8090
 ```
 
-To run just the backend or frontend, set `SERVICE`:
+Run just one service or change ports via options:
 
 ```bash
-# backend only
-SERVICE=backend docker compose up --build -d
-# frontend only
-SERVICE=frontend docker compose up --build -d
+# backend only on port 9001
+docker run --rm -p 9001:9001 homecam --backend-only --api-port 9001
+
+# frontend only on port 9000
+docker run --rm -p 9000:9000 homecam --frontend-only --port 9000
 ```
+
+The repo also includes a `deploy/docker-compose.yml` which can be used in place of `docker run`. Supply environment variables via an `.env` file and pass options with the `command` field.
 
 ## Configuration
 
-The container reads several environment variables (can be placed in a `.env` file or set in `docker compose`):
+The container reads several environment variables (they can be supplied with `-e` flags or an env file):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -45,7 +57,15 @@ The container reads several environment variables (can be placed in a `.env` fil
 | `DB_PATH` | `/data/homecam.db` | SQLite database path. |
 | `DEFAULT_RETENTION_DAYS` | `7` | Days to keep recordings by default. |
 | `RECORDING_SEGMENT_SEC` | `300` | Length of recording segments in seconds. |
-| `SERVICE` | `all` | `all`, `backend`, or `frontend` to control which processes start. |
+| `PORT` | `8090` | Frontend (Nginx) port inside the container. Overridden by `--port`. |
+| `API_PORT` | `8091` | Backend (FastAPI) port inside the container. Overridden by `--api-port`. |
+
+The entrypoint accepts:
+
+- `--frontend-only` – run only the frontend
+- `--backend-only` – run only the backend
+- `--port <n>` – set frontend port
+- `--api-port <n>` – set backend port
 
 ### Add a camera
 

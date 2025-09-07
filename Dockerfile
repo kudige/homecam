@@ -35,7 +35,8 @@ VOLUME ["/media", "/data", "/recordings"]
 ENV MEDIA_ROOT=/media \
     DB_PATH=/data/homecam.db \
     RECORDINGS_ROOT=/recordings \
-    SERVICE=all
+    PORT=8090 \
+    API_PORT=8091
 
 EXPOSE 8090 8091
 ENTRYPOINT ["/docker-entrypoint.sh"]
