@@ -16,16 +16,56 @@ A minimal home camera system: RTSP in → HLS live grid + recorded chunks, with 
 ## Quick Start (Docker)
 
 ```bash
-# In repo root
-cd frontend && npm i && npm run build && cd ..
+# Build image
+docker build -t homecam .
 
-# Launch services
-cd deploy
-docker compose up --build -d
+# Run frontend + backend
+docker run -d --name homecam \
+  -p 8090:8090 -p 8091:8091 \
+  -v /mnt/homecam/media:/media \
+  -v /mnt/homecam/data:/data \
+  -v /mnt/homecam:/recordings \
+  -e MEDIA_ROOT=/media \
+  -e DB_PATH=/data/homecam.db \
+  -e RECORDINGS_ROOT=/recordings \
+  homecam
 
 # Open
 open http://localhost:8090
 ```
+
+Run just one service or change ports via options:
+
+```bash
+# backend only on port 9001
+docker run --rm -p 9001:9001 homecam --backend-only --api-port 9001
+
+# frontend only on port 9000
+docker run --rm -p 9000:9000 homecam --frontend-only --port 9000
+```
+
+The repo also includes a `deploy/docker-compose.yml` which can be used in place of `docker run`. Supply environment variables via an `.env` file and pass options with the `command` field.
+
+## Configuration
+
+The container reads several environment variables (they can be supplied with `-e` flags or an env file):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEDIA_ROOT` | `/media` | Path for live HLS and recordings served via `/media/`. |
+| `RECORDINGS_ROOT` | `/recordings` | Optional separate location for MP4 recordings. |
+| `DB_PATH` | `/data/homecam.db` | SQLite database path. |
+| `DEFAULT_RETENTION_DAYS` | `7` | Days to keep recordings by default. |
+| `RECORDING_SEGMENT_SEC` | `300` | Length of recording segments in seconds. |
+| `PORT` | `8090` | Frontend (Nginx) port inside the container. Overridden by `--port`. |
+| `API_PORT` | `8091` | Backend (FastAPI) port inside the container. Overridden by `--api-port`. |
+
+The entrypoint accepts:
+
+- `--frontend-only` – run only the frontend
+- `--backend-only` – run only the backend
+- `--port <n>` – set frontend port
+- `--api-port <n>` – set backend port
 
 ### Add a camera
 
