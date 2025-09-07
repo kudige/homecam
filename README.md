@@ -17,15 +17,35 @@ A minimal home camera system: RTSP in → HLS live grid + recorded chunks, with 
 
 ```bash
 # In repo root
-cd frontend && npm i && npm run build && cd ..
-
-# Launch services
 cd deploy
+# Build image and launch (frontend + backend)
 docker compose up --build -d
 
 # Open
 open http://localhost:8090
 ```
+
+To run just the backend or frontend, set `SERVICE`:
+
+```bash
+# backend only
+SERVICE=backend docker compose up --build -d
+# frontend only
+SERVICE=frontend docker compose up --build -d
+```
+
+## Configuration
+
+The container reads several environment variables (can be placed in a `.env` file or set in `docker compose`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEDIA_ROOT` | `/media` | Path for live HLS and recordings served via `/media/`. |
+| `RECORDINGS_ROOT` | `/recordings` | Optional separate location for MP4 recordings. |
+| `DB_PATH` | `/data/homecam.db` | SQLite database path. |
+| `DEFAULT_RETENTION_DAYS` | `7` | Days to keep recordings by default. |
+| `RECORDING_SEGMENT_SEC` | `300` | Length of recording segments in seconds. |
+| `SERVICE` | `all` | `all`, `backend`, or `frontend` to control which processes start. |
 
 ### Add a camera
 
