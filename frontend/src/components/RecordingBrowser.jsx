@@ -29,7 +29,7 @@ export default function RecordingBrowser({ cameras }){
         <DatePicker value={date} onChange={setDate} />
       </div>
 
-      <Player src={selected} autoPlay={false} />
+      <Player src={selected} />
 
       <div style={{marginTop:12, display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(120px, 1fr))', gap:8}}>
         {files.map(f => (

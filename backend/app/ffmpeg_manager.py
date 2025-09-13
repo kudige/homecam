@@ -363,6 +363,8 @@ class FFmpegManager:
             "-map", "0:v", "-map", "0:a?",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", str(max(18, min(28, crf))),
             "-c:a", "aac", "-b:a", "128k",
+            # Place moov atom at the beginning so files are playable while downloading
+            "-movflags", "+faststart",
             "-f", "segment",
             "-segment_time", str(settings.RECORDING_SEGMENT_SEC),
             "-reset_timestamps", "1",
