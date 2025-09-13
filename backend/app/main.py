@@ -9,6 +9,7 @@ import logging
 import time
 import subprocess
 import tempfile
+import shutil
 from sqlalchemy.orm import Session
 import threading
 from typing import List
@@ -488,7 +489,10 @@ def export_recording_segment(
         if not safe.endswith(".mp4"):
             safe += ".mp4"
         dest = CLIP_DIR / safe
-        tmp_path.replace(dest)
+        try:
+            shutil.move(str(tmp_path), dest)
+        except Exception as e:
+            raise HTTPException(500, f"Failed to save clip: {e}")
         return {"path": f"/api/saved/{dest.name}", "name": dest.name}
 
     download_name = body.name or "clip.mp4"

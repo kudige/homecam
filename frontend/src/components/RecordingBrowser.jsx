@@ -33,17 +33,21 @@ export default function RecordingBrowser({ cameras }){
   async function exportClip(save){
     if (!selected || clipStart == null || clipEnd == null) return
     const body = { start: clipStart, end: clipEnd, name: clipName, save }
-    const res = await API.exportRecording(selected, body)
-    if (save){
-      await loadSaved()
-    } else {
-      const blob = res
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = (clipName || 'clip') + '.mp4'
-      a.click()
-      URL.revokeObjectURL(url)
+    try {
+      const res = await API.exportRecording(selected, body)
+      if (save){
+        await loadSaved()
+      } else {
+        const blob = res
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = (clipName || 'clip') + '.mp4'
+        a.click()
+        URL.revokeObjectURL(url)
+      }
+    } catch (e) {
+      alert(`Export failed: ${e.message}`)
     }
   }
 

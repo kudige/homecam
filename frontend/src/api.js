@@ -24,7 +24,10 @@ const API = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ start, end, name, save })
-    }).then(r => (save ? r.json() : r.blob()));
+    }).then(async r => {
+      if (!r.ok) throw new Error(await r.text());
+      return save ? r.json() : r.blob();
+    });
   },
 
   // ADMIN — cameras
