@@ -17,20 +17,11 @@ export default function OverlayPlayer({ open, role, src, loading, onClose, onTog
         {!loading && (
           <button
             onClick={onToggle}
-            title={isMedium ? 'Switch to High' : 'Switch to Medium'}
-            aria-label={isMedium ? 'Switch to High' : 'Switch to Medium'}
+            title={isMedium ? 'Switch to HD' : 'Switch to Standard'}
+            aria-label={isMedium ? 'Switch to HD' : 'Switch to Standard'}
             style={toggleBtn}
           >
-            {isMedium ? (
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" role="img">
-                <circle cx="11" cy="11" r="6.5" stroke="currentColor" strokeWidth="1.6"/>
-                <path d="M16.5 16.5L21 21" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
-              </svg>
-            ) : (
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" role="img">
-                <path d="M8 5v14l11-7-11-7z" stroke="currentColor" strokeWidth="1.6" fill="currentColor" />
-              </svg>
-            )}
+            {isMedium ? 'HD' : 'Standard'}
           </button>
         )}
         <button onClick={onClose} aria-label="Close" style={closeBtn}>
@@ -73,22 +64,25 @@ const loadingStyle = {
 const toggleBtn = {
   position: 'absolute',
   top: 8,
-  right: 8,
-  width: 32,
+  right: 48,
   height: 32,
   display: 'grid',
   placeItems: 'center',
+  padding: '0 8px',
   border: 'none',
   borderRadius: 4,
   background: 'rgba(0,0,0,0.6)',
   color: '#fff',
-  cursor: 'pointer'
+  cursor: 'pointer',
+  fontSize: 12,
+  fontWeight: 600,
+  whiteSpace: 'nowrap'
 }
 
 const closeBtn = {
   position: 'absolute',
   top: 8,
-  right: 48,
+  right: 8,
   width: 32,
   height: 32,
   display: 'grid',
