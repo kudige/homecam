@@ -30,5 +30,8 @@ if settings.RECORDINGS_ROOT:
 else:
     REC_DIR = MEDIA_ROOT / settings.REC_SUBDIR
 
+# Directory for user-saved clips from any camera
+CLIP_DIR = REC_DIR / "saved"
+
 DB_PATH = Path(settings.DB_PATH)
 

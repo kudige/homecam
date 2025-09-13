@@ -15,6 +15,21 @@ const API = {
     return fetch(`/api/cameras/${camId}/recordings/${date}`).then(r => r.json());
   },
 
+  savedVideos() {
+    return fetch('/api/saved').then(r => r.json());
+  },
+
+  exportRecording(path, { start, end, name, save }) {
+    return fetch(`${path}/export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ start, end, name, save })
+    }).then(async r => {
+      if (!r.ok) throw new Error(await r.text());
+      return save ? r.json() : r.blob();
+    });
+  },
+
   // ADMIN — cameras
   getCamerasAdmin() {
     return fetch('/api/admin/cameras').then(r => r.json());
