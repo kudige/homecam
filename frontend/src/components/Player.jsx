@@ -1,7 +1,7 @@
-import React, { useEffect, useRef } from 'react'
+import React, { useEffect, useRef, forwardRef, useImperativeHandle } from 'react'
 import Hls from 'hls.js'
 
-export default function Player({ src, autoPlay=true }){
+const Player = forwardRef(({ src, autoPlay=true }, ref) => {
   const videoRef = useRef(null)
   useEffect(() => {
     if (!src || !videoRef.current) return
@@ -19,5 +19,8 @@ export default function Player({ src, autoPlay=true }){
       videoRef.current.src = src
     }
   }, [src])
+  useImperativeHandle(ref, () => videoRef.current)
   return <video ref={videoRef} controls autoPlay={autoPlay} playsInline style={{width:'100%', height:360, background:'#000'}} />
-}
+})
+
+export default Player

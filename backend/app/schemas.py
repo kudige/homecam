@@ -98,3 +98,16 @@ class RecordingFile(BaseModel):
     path: str          # API path like /api/recordings/<cam>/<date>/<hour>/<file>.mp4
     start_ts: float    # epoch seconds
     size_bytes: int
+
+# -------- Clip export --------
+
+class ClipExportRequest(BaseModel):
+    start: float
+    end: float
+    name: Optional[str] = None
+    save: bool = False
+
+class SavedVideo(BaseModel):
+    name: str
+    path: str
+    size_bytes: int

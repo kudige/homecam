@@ -1,5 +1,5 @@
 # backend/app/main.py
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import FastAPI, Depends, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 import os
@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 import logging
 import time
+import subprocess
+import tempfile
 from sqlalchemy.orm import Session
 import threading
 from typing import List
@@ -25,11 +27,13 @@ from .schemas import (
     CameraRoleUpdate, CameraAdminOut,
     CameraClientItem, CameraClientList,
     RecordingFile,
+    ClipExportRequest,
+    SavedVideo,
 )
 from .ffmpeg_manager import ffmpeg_manager
 from .lease_static import LeaseRenewStaticFiles
 from .recordings import list_recordings
-from .config import settings, MEDIA_ROOT, LIVE_DIR, REC_DIR
+from .config import settings, MEDIA_ROOT, LIVE_DIR, REC_DIR, CLIP_DIR
 from .retention import run_retention_loop
 
 app = FastAPI(title="HomeCam API", version="0.2.0")
@@ -68,6 +72,7 @@ app.add_middleware(
 MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
 LIVE_DIR.mkdir(parents=True, exist_ok=True)
 REC_DIR.mkdir(parents=True, exist_ok=True)
+CLIP_DIR.mkdir(parents=True, exist_ok=True)
 
 # DB schema
 Base.metadata.create_all(bind=engine)
@@ -434,6 +439,116 @@ def get_recording_file(camera: str, date: str, hour: str, filename: str, request
             "Content-Length": str(end - start + 1),
         }
         return StreamingResponse(iter_file(), status_code=206, headers=headers, media_type="video/mp4")
+
+    headers = {"Accept-Ranges": "bytes"}
+    return FileResponse(file_path, media_type="video/mp4", headers=headers)
+
+
+@app.post("/api/recordings/{camera}/{date}/{hour}/{filename}/export")
+def export_recording_segment(
+    camera: str,
+    date: str,
+    hour: str,
+    filename: str,
+    body: ClipExportRequest,
+    background: BackgroundTasks,
+):
+    """Export a time range from a recording. If save is True, store on server; otherwise return file."""
+    file_path = REC_DIR / camera / date / hour / filename
+    if not file_path.exists():
+        raise HTTPException(404, "Recording not found")
+
+    start = max(0.0, body.start)
+    end = max(start, body.end)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+    tmp_path = Path(tmp.name)
+    tmp.close()
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(file_path),
+        "-ss",
+        str(start),
+        "-to",
+        str(end),
+        "-c",
+        "copy",
+        str(tmp_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True)
+    if proc.returncode != 0:
+        raise HTTPException(500, f"ffmpeg failed: {proc.stderr.decode('utf-8', 'ignore')}")
+
+    if body.save:
+        name = body.name or f"clip_{int(time.time())}.mp4"
+        safe = re.sub(r"[^\w\-]+", "_", name)
+        if not safe.endswith(".mp4"):
+            safe += ".mp4"
+        dest = CLIP_DIR / safe
+        tmp_path.replace(dest)
+        return {"path": f"/api/saved/{dest.name}", "name": dest.name}
+
+    download_name = body.name or "clip.mp4"
+    if not download_name.endswith(".mp4"):
+        download_name += ".mp4"
+    background.add_task(lambda p: os.remove(p), tmp_path)
+    return FileResponse(tmp_path, media_type="video/mp4", filename=download_name)
+
+
+@app.get("/api/saved", response_model=list[SavedVideo])
+def list_saved_videos():
+    items: List[SavedVideo] = []
+    if not CLIP_DIR.exists():
+        return []
+    for f in sorted(CLIP_DIR.glob("*.mp4")):
+        items.append(
+            SavedVideo(name=f.stem, path=f"/api/saved/{f.name}", size_bytes=f.stat().st_size)
+        )
+    return items
+
+
+@app.get("/api/saved/{filename}")
+def get_saved_video(filename: str, request: Request):
+    file_path = CLIP_DIR / filename
+    if not file_path.exists():
+        raise HTTPException(404, "Not found")
+
+    file_size = file_path.stat().st_size
+    range_header = request.headers.get("range")
+    if range_header:
+        m = re.match(r"bytes=(\d+)-(\d+)?", range_header)
+        if m:
+            start = int(m.group(1))
+            end = int(m.group(2)) if m.group(2) else file_size - 1
+            end = min(end, file_size - 1)
+        else:
+            start, end = 0, file_size - 1
+
+        chunk_size = 1024 * 1024
+
+        def iter_file():
+            with open(file_path, "rb") as f:
+                f.seek(start)
+                remaining = end - start + 1
+                while remaining > 0:
+                    read_len = min(chunk_size, remaining)
+                    data = f.read(read_len)
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        headers = {
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(end - start + 1),
+        }
+        return StreamingResponse(
+            iter_file(), status_code=206, headers=headers, media_type="video/mp4"
+        )
 
     headers = {"Accept-Ranges": "bytes"}
     return FileResponse(file_path, media_type="video/mp4", headers=headers)
