@@ -1,8 +1,10 @@
 # backend/app/main.py
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 import os
+import re
+from pathlib import Path
 import logging
 import time
 from sqlalchemy.orm import Session
@@ -395,14 +397,46 @@ def recordings_for_date(cam_id: int, date: str, session: Session = Depends(get_s
     return out
 
 @app.get("/api/recordings/{camera}/{date}/{hour}/{filename}")
-def get_recording_file(camera: str, date: str, hour: str, filename: str):
-    """
-    Returns the actual MP4 file content for playback/download.
-    """
+def get_recording_file(camera: str, date: str, hour: str, filename: str, request: Request):
+    """Return MP4 content with basic Range support for seeking."""
     file_path = REC_DIR / camera / date / hour / filename
     if not file_path.exists():
         raise HTTPException(404, "Recording not found")
-    return FileResponse(file_path)
+
+    file_size = file_path.stat().st_size
+    range_header = request.headers.get("range")
+    if range_header:
+        m = re.match(r"bytes=(\d+)-(\d+)?", range_header)
+        if m:
+            start = int(m.group(1))
+            end = int(m.group(2)) if m.group(2) else file_size - 1
+            end = min(end, file_size - 1)
+        else:
+            start, end = 0, file_size - 1
+
+        chunk_size = 1024 * 1024
+
+        def iter_file():
+            with open(file_path, "rb") as f:
+                f.seek(start)
+                remaining = end - start + 1
+                while remaining > 0:
+                    read_len = min(chunk_size, remaining)
+                    data = f.read(read_len)
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        headers = {
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(end - start + 1),
+        }
+        return StreamingResponse(iter_file(), status_code=206, headers=headers, media_type="video/mp4")
+
+    headers = {"Accept-Ranges": "bytes"}
+    return FileResponse(file_path, media_type="video/mp4", headers=headers)
 
 @app.get("/api/admin/cameras/{cam_id}/streams", response_model=list[CameraStreamOut])
 def admin_list_streams(cam_id: int, session: Session = Depends(get_session)):
