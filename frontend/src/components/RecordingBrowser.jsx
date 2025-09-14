@@ -12,7 +12,6 @@ export default function RecordingBrowser({ cameras }){
   const [clipStart, setClipStart] = useState(null)
   const [clipEnd, setClipEnd] = useState(null)
   const [clipName, setClipName] = useState('')
-  const [showSaved, setShowSaved] = useState(false)
   const [saved, setSaved] = useState([])
 
   useEffect(() => { if (cameras.length && !camId) setCamId(cameras[0].id) }, [cameras])
@@ -26,6 +25,7 @@ export default function RecordingBrowser({ cameras }){
 
   useEffect(() => { load() }, [camId, date])
   useEffect(() => { setClipStart(null); setClipEnd(null) }, [selected])
+  useEffect(() => { loadSaved() }, [])
 
   function markStart(){ if (videoRef.current) setClipStart(videoRef.current.currentTime) }
   function markEnd(){ if (videoRef.current) setClipEnd(videoRef.current.currentTime) }
@@ -57,49 +57,47 @@ export default function RecordingBrowser({ cameras }){
   }
 
   return (
-    <div className="panel">
-      <div className="row" style={{gap:12, marginBottom:12}}>
-        <select value={camId || ''} onChange={e=>setCamId(String(e.target.value))}>
-          {cameras.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-        </select>
-        <DatePicker value={date} onChange={setDate} />
+    <div className="row" style={{alignItems:'flex-start', gap:16}}>
+      <div className="panel" style={{flex:1, display:'flex', flexDirection:'column', height:'calc(100vh - 160px)'}}>
+        <div className="row" style={{gap:12, marginBottom:12}}>
+          <select value={camId || ''} onChange={e=>setCamId(String(e.target.value))}>
+            {cameras.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+          <DatePicker value={date} onChange={setDate} />
+        </div>
+
+        <div style={{flex:1}}>
+          <Player src={selected} ref={videoRef} style={{height:'100%'}} />
+        </div>
+
+        <div className="row" style={{gap:8, marginTop:8, flexWrap:'wrap', alignItems:'center'}}>
+          <button className="btn secondary" onClick={markStart}>Set Start</button>
+          <button className="btn secondary" onClick={markEnd}>Set End</button>
+          <span>Start: {clipStart?.toFixed(1) ?? '-'}</span>
+          <span>End: {clipEnd?.toFixed(1) ?? '-'}</span>
+          <input value={clipName} onChange={e=>setClipName(e.target.value)} placeholder="name" />
+          <button className="btn" onClick={()=>exportClip(false)}>Download</button>
+          <button className="btn" onClick={()=>exportClip(true)}>Save</button>
+        </div>
+
+        <div style={{marginTop:12, display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(120px, 1fr))', gap:8}}>
+          {files.map(f => (
+            <button key={f.path} className="btn secondary" onClick={()=>setSelected(f.path)}>
+              {formatTimeLabel(f.start_ts)}
+            </button>
+          ))}
+          {!files.length && <div>No recordings for this date.</div>}
+        </div>
       </div>
 
-      <Player src={selected} ref={videoRef} />
-
-      <div className="row" style={{gap:8, marginTop:8, flexWrap:'wrap', alignItems:'center'}}>
-        <button className="btn secondary" onClick={markStart}>Set Start</button>
-        <button className="btn secondary" onClick={markEnd}>Set End</button>
-        <span>Start: {clipStart?.toFixed(1) ?? '-'}</span>
-        <span>End: {clipEnd?.toFixed(1) ?? '-'}</span>
-        <input value={clipName} onChange={e=>setClipName(e.target.value)} placeholder="name" />
-        <button className="btn" onClick={()=>exportClip(false)}>Download</button>
-        <button className="btn" onClick={()=>exportClip(true)}>Save</button>
-      </div>
-
-      <div style={{marginTop:12, display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(120px, 1fr))', gap:8}}>
-        {files.map(f => (
-          <button key={f.path} className="btn secondary" onClick={()=>setSelected(f.path)}>
-            {formatTimeLabel(f.start_ts)}
-          </button>
-        ))}
-        {!files.length && <div>No recordings for this date.</div>}
-      </div>
-
-      <div style={{marginTop:16}}>
-        <button className="btn secondary" onClick={async ()=>{if(!showSaved){await loadSaved()} setShowSaved(!showSaved)}}>
-          {showSaved ? 'Hide Saved Videos' : 'View Saved Videos'}
-        </button>
-        {showSaved && (
-          <div style={{marginTop:8}}>
-            {saved.map(s => (
-              <div key={s.path}>
-                <a href={s.path} target="_blank" rel="noopener">{s.name}</a>
-              </div>
-            ))}
-            {saved.length === 0 && <div>No saved videos.</div>}
+      <div className="panel" style={{width:260, maxHeight:'calc(100vh - 160px)', overflowY:'auto'}}>
+        <h3 style={{marginTop:0}}>Saved Clips</h3>
+        {saved.map(s => (
+          <div key={s.path} style={{marginBottom:8}}>
+            <a href={s.path} target="_blank" rel="noopener">{s.name}</a>
           </div>
-        )}
+        ))}
+        {saved.length === 0 && <div>No saved videos.</div>}
       </div>
     </div>
   )
