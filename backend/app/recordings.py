@@ -4,8 +4,10 @@ import os, time, re
 from typing import List
 from .config import REC_DIR
 
-# Filenames like: YYYY-MM-DD_HH-MM-SS.mp4
-FNAME_RE = re.compile(r"(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})\.mp4$")
+# Filenames like: YYYY-MM-DD_HH-MM-SS[_NNN].mp4
+FNAME_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})(?:_(\d+))?\.mp4$"
+)
 
 def list_recordings(camera: str, date_str: str) -> List[dict]:
     base = REC_DIR / camera / date_str
@@ -20,10 +22,9 @@ def list_recordings(camera: str, date_str: str) -> List[dict]:
                 continue
             full = Path(hour_dir) / f
             try:
-                ts = time.mktime(time.strptime(
-                    FNAME_RE.search(f).group(0).replace('.mp4',''),
-                    "%Y-%m-%d_%H-%M-%S"
-                ))
+                m = FNAME_RE.search(f)
+                ts_str = f"{m.group(1)}_{m.group(2)}-{m.group(3)}-{m.group(4)}"
+                ts = time.mktime(time.strptime(ts_str, "%Y-%m-%d_%H-%M-%S"))
             except Exception:
                 ts = full.stat().st_mtime
 

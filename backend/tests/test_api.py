@@ -17,9 +17,10 @@ def api_client(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", str(db_path))
 
     # Reload configuration and database modules so they pick up the new DB_PATH
-    from backend.app import config, db, ffmpeg_manager, main
+    from backend.app import config, db, ffmpeg_manager, main, models
     importlib.reload(config)
     importlib.reload(db)
+    importlib.reload(models)
     importlib.reload(ffmpeg_manager)
     importlib.reload(main)
 
