@@ -355,6 +355,17 @@ class FFmpegManager:
         self._ensure_rec_date_hour(cam_name)
         rec_base = REC_DIR / cam_name
         log = LIVE_DIR / cam_name / f"ffmpeg_recording.log"
+
+        # Determine start index so we don't clobber existing files when
+        # restarting within the same period. We only care about the current
+        # date/hour since future segments will get unique names automatically.
+        now = time.localtime()
+        date_dir = time.strftime("%Y-%m-%d", now)
+        hour_dir = time.strftime("%H", now)
+        hour_path = rec_base / date_dir / hour_dir
+        base_prefix = f"{date_dir}_{hour_dir}-00-00"
+        start_num = len(list(hour_path.glob(f"{base_prefix}*.mp4")))
+
         cmd = [
             "ffmpeg", "-y", "-nostdin", "-hide_banner", "-loglevel", "warning",
             "-rtsp_transport", "tcp",
@@ -367,9 +378,12 @@ class FFmpegManager:
             "-movflags", "+faststart",
             "-f", "segment",
             "-segment_time", str(settings.RECORDING_SEGMENT_SEC),
+            "-segment_atclocktime", "1",
+            "-segment_clocktime_offset", "0",
+            "-segment_start_number", str(start_num),
             "-reset_timestamps", "1",
             "-strftime", "1",
-            str(rec_base / "%Y-%m-%d/%H/%Y-%m-%d_%H-%M-%S.mp4"),
+            str(rec_base / "%Y-%m-%d/%H/%Y-%m-%d_%H-00-00_%03d.mp4"),
         ]
         return _spawn(cmd, log)
 
