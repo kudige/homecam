@@ -328,9 +328,13 @@ class FFmpegManager:
             "-maxrate", "4000k" if role != "grid" else "1200k",
             "-bufsize", "4000k" if role != "grid" else "1200k",
         ]
-        vf = []
+        # Always force square pixels. When scale_w/scale_h are provided (auto mode)
+        # apply scaling then set SAR=1; otherwise just set SAR to 1 while keeping
+        # original resolution for manual mode streams.
         if scale_w and scale_h:
-            vf = ["-vf", f"scale={scale_w}:{scale_h}"]  # only used for grid/auto
+            vf = ["-vf", f"scale={scale_w}:{scale_h},setsar=1"]
+        else:
+            vf = ["-vf", "setsar=1"]
 
         mapping = ["-map", "0:v"]
         audio = ["-an"]
