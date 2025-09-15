@@ -51,3 +51,16 @@ Recording files are saved in 5-minute MP4 chunks (`media/recordings/<camera>/YYY
 - Run the motion listener as a lightweight Python process or small container.
 
 With these steps, the system can provide motion markers for recorded video with minimal additional CPU overhead.
+
+## 7. Fallback When Motion Events Are Unavailable
+
+Some cameras either do not support ONVIF motion notifications or emit them unreliably. In that case you can run a lightweight
+server-side motion detector:
+
+- Use FFmpeg's scene detection filter (`-vf select='gt(scene,0.003)'`) to output timestamps where significant changes occur.
+- Downscale the stream and lower the frame rate before analysis to reduce CPU usage.
+- Alternatively, rely on tools like OpenCV or the `motion` package, configuring them to sample frames sparingly and emit
+  event timestamps like in steps 2 and 3 above.
+
+While this approach consumes more CPU than camera-sourced events, careful tuning keeps resource usage modest and ensures
+you still capture motion markers when device support is lacking.
